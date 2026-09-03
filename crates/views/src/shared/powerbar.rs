@@ -1,14 +1,10 @@
 use gpui::prelude::*;
-use gpui::{
-    App, Context, Entity, FocusHandle, Global, Render, SharedString, Window, div, px, svg,
-};
+use gpui::{App, Context, Entity, FocusHandle, Global, Render, SharedString, Window, div, px, svg};
 use i18n::t;
 use input::POWERBAR_CONTEXT;
 use router::{Destination, navigate};
 use state::{Hit, Origin, Playback, Search};
-use ui::{
-    ActiveTheme as _, Dismiss, Input, Modal, SelectNext, SelectPrevious, Submit, Text,
-};
+use ui::{ActiveTheme as _, Dismiss, Input, Modal, SelectNext, SelectPrevious, Submit, Text};
 
 use crate::shared::tracks::{PlaybackStatus, playback_status};
 use input::PowerbarConfirm;
@@ -22,7 +18,6 @@ pub(crate) struct Powerbar {
     search: Entity<Search>,
     playback: Entity<Playback>,
     playback_status: PlaybackStatus,
-    /// Flat list of hits shown (up to MAX_PER_KIND per kind, by Kind::ALL order).
     items: Vec<Hit>,
     selected: Option<usize>,
     focus: FocusHandle,
@@ -33,8 +28,6 @@ struct Installed(Entity<Powerbar>);
 impl Global for Installed {}
 
 impl Powerbar {
-    /// Creates (or retrieves) the singleton Powerbar, wired to the given search/playback.
-    /// Call this once during Workspace construction.
     pub fn entity(
         search: Entity<Search>,
         playback: Entity<Playback>,
@@ -49,21 +42,17 @@ impl Powerbar {
                         .icon("icons/search.svg")
                         .clearable()
                 });
-
-                // Drive the shared Search state with whatever the user types.
                 cx.observe(&input, |this: &mut Powerbar, input, cx| {
                     let query = input.read(cx).text().to_owned();
                     this.search.update(cx, |search, cx| search.ask(&query, cx));
                 })
                 .detach();
 
-                // Recompute visible items when search results change.
                 cx.observe(&search, |this: &mut Powerbar, _, cx| {
                     this.rebuild_items(cx);
                 })
                 .detach();
 
-                // Keep playback status fresh to show the correct play/pause state.
                 cx.observe(&playback, |this: &mut Powerbar, playback, cx| {
                     let current = playback_status(&playback, cx);
                     if this.playback_status != current {
@@ -90,7 +79,6 @@ impl Powerbar {
         cx.global::<Installed>().0.clone()
     }
 
-    /// Toggle open / closed. Call this from the workspace action handler.
     pub fn toggle(window: &mut Window, cx: &mut App) {
         let Some(bar) = cx.try_global::<Installed>().map(|i| i.0.clone()) else {
             return;
@@ -108,11 +96,9 @@ impl Powerbar {
         self.restore = window.focused(cx);
         self.open = true;
         self.selected = None;
-        self.input
-            .update(cx, |input, cx| input.focus(window, cx));
+        self.input.update(cx, |input, cx| input.focus(window, cx));
         let query = self.input.read(cx).text().to_owned();
-        self.search
-            .update(cx, |search, cx| search.ask(&query, cx));
+        self.search.update(cx, |search, cx| search.ask(&query, cx));
         cx.notify();
     }
 
@@ -141,10 +127,10 @@ impl Powerbar {
         }
         let len = items.len();
         self.items = items;
-        if let Some(sel) = self.selected {
-            if sel >= len {
-                self.selected = if len == 0 { None } else { Some(len - 1) };
-            }
+        if let Some(sel) = self.selected
+            && sel >= len
+        {
+            self.selected = if len == 0 { None } else { Some(len - 1) };
         }
         cx.notify();
     }
@@ -161,18 +147,12 @@ impl Powerbar {
         cx.notify();
     }
 
-    fn select_previous(
-        &mut self,
-        _: &SelectPrevious,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn select_previous(&mut self, _: &SelectPrevious, window: &mut Window, cx: &mut Context<Self>) {
         match self.selected {
             None => {}
             Some(0) => {
                 self.selected = None;
-                self.input
-                    .update(cx, |input, cx| input.focus(window, cx));
+                self.input.update(cx, |input, cx| input.focus(window, cx));
                 cx.notify();
             }
             Some(i) => {
@@ -200,15 +180,9 @@ impl Powerbar {
     }
 
     fn selected_hit(&self) -> Option<Hit> {
-        self.selected
-            .and_then(|i| self.items.get(i))
-            .cloned()
+        self.selected.and_then(|i| self.items.get(i)).cloned()
     }
 }
-
-// ──────────────────────────────────────────────────────────────────
-// Helpers: navigate / play a hit
-// ──────────────────────────────────────────────────────────────────
 
 fn navigate_hit(hit: &Hit, cx: &mut App) {
     match hit {
@@ -226,7 +200,10 @@ fn navigate_hit(hit: &Hit, cx: &mut App) {
             navigate(Destination::Album(SharedString::from(album.id.clone())), cx);
         }
         Hit::Playlist(list) => {
-            navigate(Destination::Playlist(SharedString::from(list.id.clone())), cx);
+            navigate(
+                Destination::Playlist(SharedString::from(list.id.clone())),
+                cx,
+            );
         }
     }
 }
@@ -253,10 +230,6 @@ fn play_hit(hit: &Hit, playback: &Entity<Playback>, cx: &mut App) {
         }
     });
 }
-
-// ──────────────────────────────────────────────────────────────────
-// Render
-// ──────────────────────────────────────────────────────────────────
 
 impl Render for Powerbar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -287,14 +260,12 @@ impl Render for Powerbar {
                     .child(self.input.clone())
                     .when(!items.is_empty(), |modal| {
                         modal.child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(2.))
-                                .pt_1()
-                                .children(items.iter().enumerate().map(|(i, hit)| {
-                                    hit_row(hit, selected == Some(i), &theme)
-                                })),
+                            div().flex().flex_col().gap(px(2.)).pt_1().children(
+                                items
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, hit)| hit_row(hit, selected == Some(i), &theme)),
+                            ),
                         )
                     })
                     .on_dismiss(cx.listener(|this, _, window, cx| this.close(window, cx))),
@@ -302,10 +273,6 @@ impl Render for Powerbar {
             .into_any_element()
     }
 }
-
-// ──────────────────────────────────────────────────────────────────
-// Row rendering
-// ──────────────────────────────────────────────────────────────────
 
 fn hit_row(hit: &Hit, chosen: bool, theme: &ui::Theme) -> impl IntoElement {
     let (label, subtitle, cover, icon) = describe_hit(hit);
@@ -336,16 +303,12 @@ fn hit_row(hit: &Hit, chosen: bool, theme: &ui::Theme) -> impl IntoElement {
                             .size_full()
                             .object_fit(gpui::ObjectFit::Cover),
                     ),
-                    None => d
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            svg()
-                                .path(icons::path(icon))
-                                .size(px(18.))
-                                .text_color(theme.muted_foreground),
-                        ),
+                    None => d.flex().items_center().justify_center().child(
+                        svg()
+                            .path(icons::path(icon))
+                            .size(px(18.))
+                            .text_color(theme.muted_foreground),
+                    ),
                 }),
         )
         .child(
@@ -372,9 +335,7 @@ fn hit_row(hit: &Hit, chosen: bool, theme: &ui::Theme) -> impl IntoElement {
         )
 }
 
-fn describe_hit(
-    hit: &Hit,
-) -> (SharedString, SharedString, Option<String>, &'static str) {
+fn describe_hit(hit: &Hit) -> (SharedString, SharedString, Option<String>, &'static str) {
     match hit {
         Hit::Song(track) => (
             SharedString::from(track.name.clone()),
