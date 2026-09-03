@@ -22,12 +22,15 @@ actions!(
         OpenSettings,
         ToggleFullscreen,
         ToggleQueue,
-        ToggleLyrics
+        ToggleLyrics,
+        TogglePowerbar,
+        PowerbarConfirm
     ]
 );
 
 pub const WORKSPACE_CONTEXT: &str = "Workspace";
 pub const SEARCH_CONTEXT: &str = "Search";
+pub const POWERBAR_CONTEXT: &str = "Powerbar";
 
 pub fn bindings() -> Vec<KeyBinding> {
     let editing = Some(INPUT_CONTEXT);
@@ -79,6 +82,10 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("shift-ctrl-f", OpenSearch, None),
         KeyBinding::new("ctrl-,", OpenSettings, None),
         KeyBinding::new("cmd-,", OpenSettings, None),
+        KeyBinding::new("ctrl-space", TogglePowerbar, None),
+        KeyBinding::new("cmd-space", TogglePowerbar, None),
+        KeyBinding::new("ctrl-enter", PowerbarConfirm, Some(POWERBAR_CONTEXT)),
+        KeyBinding::new("cmd-enter", PowerbarConfirm, Some(POWERBAR_CONTEXT)),
         KeyBinding::new("space", TogglePlayback, Some(&away_from_text)),
         KeyBinding::new("ctrl-left", SongPrevious, Some(&away_from_text)),
         KeyBinding::new("ctrl-right", SongNext, Some(&away_from_text)),
