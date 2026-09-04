@@ -375,16 +375,10 @@ impl Render for Powerbar {
                 let playback = self.playback.clone();
                 let this_entity = cx.entity().clone();
                 flat_children.push(
-                    hit_row(hit, is_chosen, &theme, move |window, cx| {
+                    hit_row(hit, item_idx, is_chosen, &theme, move |window, cx| {
                         play_hit(&hit_play, &playback, cx);
                         this_entity.update(cx, |this, cx| this.close(window, cx));
                     })
-                    .on_mouse_move(cx.listener(move |this, _, _, cx| {
-                        if this.selected != Some(item_idx) {
-                            this.selected = Some(item_idx);
-                            cx.notify();
-                        }
-                    }))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, window, cx| {
@@ -440,6 +434,7 @@ impl Render for Powerbar {
 
 fn hit_row(
     hit: &Hit,
+    item_idx: usize,
     chosen: bool,
     theme: &ui::Theme,
     on_play: impl Fn(&mut Window, &mut App) + 'static,
@@ -466,6 +461,8 @@ fn hit_row(
         false => theme.radius,
     };
 
+    let row_group: SharedString = format!("row-{item_idx}").into();
+
     let thumbnail = div()
         .relative()
         .flex_none()
@@ -473,6 +470,7 @@ fn hit_row(
         .child(visual)
         .child(
             div()
+                .id(("hit-play-scrim", item_idx))
                 .absolute()
                 .inset_0()
                 .rounded(corner)
@@ -480,8 +478,9 @@ fn hit_row(
                 .items_center()
                 .justify_center()
                 .cursor_pointer()
-                .opacity(0.0)
-                .hover(|style| style.opacity(1.0).bg(theme.overlay))
+                .invisible()
+                .hover(|style| style.visible().bg(theme.overlay))
+                .group_hover(row_group.clone(), |style| style.visible().bg(theme.overlay))
                 .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                     cx.stop_propagation();
                     on_play(window, cx);
@@ -495,6 +494,7 @@ fn hit_row(
         );
 
     div()
+        .group(row_group)
         .flex()
         .items_center()
         .gap_2()
