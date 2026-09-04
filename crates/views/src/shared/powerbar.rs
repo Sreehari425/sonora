@@ -23,12 +23,13 @@ pub(crate) struct Powerbar {
     search: Entity<Search>,
     playback: Entity<Playback>,
     playback_status: PlaybackStatus,
-    items: Vec<Hit>,
+    grouped: Vec<(Kind, Vec<Hit>)>,
     selected: Option<usize>,
     focus: FocusHandle,
     restore: Option<FocusHandle>,
     scroll: ScrollHandle,
     item_to_child: Vec<usize>,
+    category_starts: Vec<usize>,
 }
 
 struct Installed(Entity<Powerbar>);
@@ -75,12 +76,13 @@ impl Powerbar {
                     search,
                     playback,
                     playback_status: current_status,
-                    items: Vec::new(),
+                    grouped: Vec::new(),
                     selected: None,
                     focus: cx.focus_handle(),
                     restore: None,
                     scroll: ScrollHandle::new(),
                     item_to_child: Vec::new(),
+                    category_starts: Vec::new(),
                 }
             });
             cx.set_global(Installed(bar));
@@ -123,33 +125,64 @@ impl Powerbar {
     fn rebuild_items(&mut self, cx: &mut Context<Self>) {
         let search = self.search.read(cx);
         if search.query().trim().is_empty() {
-            self.items.clear();
+            self.grouped.clear();
+            self.item_to_child.clear();
+            self.category_starts.clear();
             self.selected = None;
             cx.notify();
             return;
         }
 
-        let mut items = Vec::new();
+        let mut grouped = Vec::with_capacity(Kind::ALL.len());
+        let mut item_to_child = Vec::new();
+        let mut category_starts = Vec::new();
+        let mut child_count = 0;
+        let mut flat_idx = 0;
+
         for kind in Kind::ALL {
-            items.extend(search.of(kind).take(MAX_PER_KIND).cloned());
+            let hits: Vec<Hit> = search.of(kind).take(MAX_PER_KIND).cloned().collect();
+            if hits.is_empty() {
+                continue;
+            }
+            category_starts.push(flat_idx);
+            child_count += 1;
+            for _ in &hits {
+                item_to_child.push(child_count);
+                child_count += 1;
+                flat_idx += 1;
+            }
+            grouped.push((kind, hits));
         }
-        let len = items.len();
-        self.items = items;
+
+        let total_items = flat_idx;
+        self.grouped = grouped;
+        self.item_to_child = item_to_child;
+        self.category_starts = category_starts;
+
         if let Some(sel) = self.selected
-            && sel >= len
+            && sel >= total_items
         {
-            self.selected = if len == 0 { None } else { Some(len - 1) };
+            self.selected = if total_items == 0 {
+                None
+            } else {
+                Some(total_items - 1)
+            };
         }
         cx.notify();
     }
 
+    fn total_items(&self) -> usize {
+        self.item_to_child.len()
+    }
+
     fn select_next(&mut self, _: &SelectNext, window: &mut Window, cx: &mut Context<Self>) {
-        if self.items.is_empty() {
+        let total = self.total_items();
+        if total == 0 {
             return;
         }
         let idx = match self.selected {
             None => 0,
-            Some(i) => (i + 1).min(self.items.len() - 1),
+            Some(i) => (i + 1).min(total - 1),
         };
         self.selected = Some(idx);
         if let Some(&child) = self.item_to_child.get(idx) {
@@ -180,35 +213,22 @@ impl Powerbar {
         }
     }
 
-    fn category_starts(&self) -> Vec<usize> {
-        let mut starts = Vec::new();
-        let mut last_kind = None;
-        for (i, hit) in self.items.iter().enumerate() {
-            let kind = hit.kind();
-            if last_kind != Some(kind) {
-                starts.push(i);
-                last_kind = Some(kind);
-            }
-        }
-        starts
-    }
-
     fn select_next_category(
         &mut self,
         _: &PowerbarNextCategory,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let starts = self.category_starts();
-        if starts.is_empty() {
+        if self.category_starts.is_empty() {
             return;
         }
         let current = self.selected.unwrap_or(0);
-        let next = starts
+        let next = self
+            .category_starts
             .iter()
             .copied()
             .find(|&idx| idx > current)
-            .unwrap_or(starts[0]);
+            .unwrap_or(self.category_starts[0]);
         self.selected = Some(next);
         if let Some(&child) = self.item_to_child.get(next) {
             self.scroll.scroll_to_item(child);
@@ -223,16 +243,16 @@ impl Powerbar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let starts = self.category_starts();
-        if starts.is_empty() {
+        if self.category_starts.is_empty() {
             return;
         }
         let current = self.selected.unwrap_or(0);
-        let prev = starts
+        let prev = self
+            .category_starts
             .iter()
             .copied()
             .rfind(|&idx| idx < current)
-            .unwrap_or(*starts.last().unwrap());
+            .unwrap_or(*self.category_starts.last().unwrap());
         self.selected = Some(prev);
         if let Some(&child) = self.item_to_child.get(prev) {
             self.scroll.scroll_to_item(child);
@@ -242,21 +262,36 @@ impl Powerbar {
     }
 
     fn activate(&mut self, _: &Submit, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(hit) = self.selected_hit().or_else(|| self.items.first().cloned()) {
+        if let Some(hit) = self.selected_hit().or_else(|| self.first_hit()) {
             navigate_hit(&hit, cx);
         }
         self.close(window, cx);
     }
 
     fn play_confirm(&mut self, _: &PowerbarConfirm, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(hit) = self.selected_hit().or_else(|| self.items.first().cloned()) {
+        if let Some(hit) = self.selected_hit().or_else(|| self.first_hit()) {
             play_hit(&hit, &self.playback, cx);
         }
         self.close(window, cx);
     }
 
     fn selected_hit(&self) -> Option<Hit> {
-        self.selected.and_then(|i| self.items.get(i)).cloned()
+        let idx = self.selected?;
+        self.hit_at(idx)
+    }
+
+    fn first_hit(&self) -> Option<Hit> {
+        self.hit_at(0)
+    }
+
+    fn hit_at(&self, mut idx: usize) -> Option<Hit> {
+        for (_, hits) in &self.grouped {
+            if idx < hits.len() {
+                return hits.get(idx).cloned();
+            }
+            idx -= hits.len();
+        }
+        None
     }
 }
 
@@ -323,38 +358,33 @@ impl Render for Powerbar {
         }
 
         let theme = *cx.theme();
-        let items = self.items.clone();
         let selected = self.selected;
 
-        let mut grouped: Vec<(Kind, Vec<(usize, Hit)>)> = Vec::new();
-        for (i, hit) in items.iter().enumerate() {
-            let kind = hit.kind();
-            if let Some(group) = grouped.iter_mut().find(|(k, _)| *k == kind) {
-                group.1.push((i, hit.clone()));
-            } else {
-                grouped.push((kind, vec![(i, hit.clone())]));
-            }
-        }
-
         let mut flat_children: Vec<AnyElement> = Vec::new();
-        let mut item_to_child: Vec<usize> = vec![0; items.len()];
-        for (g_idx, (kind, group_items)) in grouped.into_iter().enumerate() {
+        let mut flat_idx = 0;
+
+        for (g_idx, (kind, group_items)) in self.grouped.iter().enumerate() {
             flat_children.push(
                 div()
                     .px_2()
                     .pt_2()
                     .pb_1()
                     .when(g_idx > 0, |d| d.border_t_1().border_color(theme.border))
-                    .child(eyebrow(category_title(kind), cx))
+                    .child(eyebrow(category_title(*kind), cx))
                     .into_any_element(),
             );
-            for (item_idx, hit) in group_items {
-                let child_idx = flat_children.len();
-                item_to_child[item_idx] = child_idx;
+            for hit in group_items {
+                let item_idx = flat_idx;
                 let is_chosen = selected == Some(item_idx);
                 let hit_clone = hit.clone();
                 flat_children.push(
-                    hit_row(&hit, is_chosen, &theme)
+                    hit_row(hit, is_chosen, &theme)
+                        .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                            if this.selected != Some(item_idx) {
+                                this.selected = Some(item_idx);
+                                cx.notify();
+                            }
+                        }))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _, window, cx| {
@@ -365,9 +395,9 @@ impl Render for Powerbar {
                         )
                         .into_any_element(),
                 );
+                flat_idx += 1;
             }
         }
-        self.item_to_child = item_to_child;
 
         let scroll = self.scroll.clone();
 
