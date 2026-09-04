@@ -1,7 +1,7 @@
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, Div, Entity, FocusHandle, Global, MouseButton, Render, ScrollHandle,
-    SharedString, Window, div,
+    SharedString, Window, div, px, svg,
 };
 use i18n::t;
 use input::{POWERBAR_CONTEXT, PowerbarConfirm, PowerbarNextCategory, PowerbarPrevCategory};
@@ -371,23 +371,29 @@ impl Render for Powerbar {
                 let item_idx = flat_idx;
                 let is_chosen = selected == Some(item_idx);
                 let hit_clone = hit.clone();
+                let hit_play = hit.clone();
+                let playback = self.playback.clone();
+                let this_entity = cx.entity().clone();
                 flat_children.push(
-                    hit_row(hit, is_chosen, &theme)
-                        .on_mouse_move(cx.listener(move |this, _, _, cx| {
-                            if this.selected != Some(item_idx) {
-                                this.selected = Some(item_idx);
-                                cx.notify();
-                            }
-                        }))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                navigate_hit(&hit_clone, cx);
-                                this.close(window, cx);
-                            }),
-                        )
-                        .into_any_element(),
+                    hit_row(hit, is_chosen, &theme, move |window, cx| {
+                        play_hit(&hit_play, &playback, cx);
+                        this_entity.update(cx, |this, cx| this.close(window, cx));
+                    })
+                    .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                        if this.selected != Some(item_idx) {
+                            this.selected = Some(item_idx);
+                            cx.notify();
+                        }
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            navigate_hit(&hit_clone, cx);
+                            this.close(window, cx);
+                        }),
+                    )
+                    .into_any_element(),
                 );
                 flat_idx += 1;
             }
@@ -432,7 +438,12 @@ impl Render for Powerbar {
     }
 }
 
-fn hit_row(hit: &Hit, chosen: bool, theme: &ui::Theme) -> Div {
+fn hit_row(
+    hit: &Hit,
+    chosen: bool,
+    theme: &ui::Theme,
+    on_play: impl Fn(&mut Window, &mut App) + 'static,
+) -> Div {
     let (label, subtitle, cover, icon) = describe_hit(hit);
 
     let bg = match chosen {
@@ -441,13 +452,47 @@ fn hit_row(hit: &Hit, chosen: bool, theme: &ui::Theme) -> Div {
     };
 
     let thumb_size = theme.metrics.thumb;
-    let visual = match hit {
-        Hit::Artist(_) => Avatar::new(cover).size(thumb_size).into_any_element(),
-        _ => Artwork::new(cover)
+    let is_artist = matches!(hit, Hit::Artist(_));
+    let visual = match is_artist {
+        true => Avatar::new(cover).size(thumb_size).into_any_element(),
+        false => Artwork::new(cover)
             .size(thumb_size)
             .fallback(icon)
             .into_any_element(),
     };
+
+    let corner = match is_artist {
+        true => thumb_size / 2.,
+        false => theme.radius,
+    };
+
+    let thumbnail = div()
+        .relative()
+        .flex_none()
+        .size(thumb_size)
+        .child(visual)
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .rounded(corner)
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .opacity(0.0)
+                .hover(|style| style.opacity(1.0).bg(theme.overlay))
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    cx.stop_propagation();
+                    on_play(window, cx);
+                })
+                .child(
+                    svg()
+                        .path(icons::path("icons/play-filled.svg"))
+                        .size(px(16.))
+                        .text_color(theme.overlay_foreground),
+                ),
+        );
 
     div()
         .flex()
@@ -462,7 +507,7 @@ fn hit_row(hit: &Hit, chosen: bool, theme: &ui::Theme) -> Div {
             true => style,
             false => style.bg(theme.secondary_hover),
         })
-        .child(visual)
+        .child(thumbnail)
         .child(
             div()
                 .flex()
