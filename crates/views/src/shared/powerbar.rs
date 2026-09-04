@@ -1,14 +1,15 @@
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, Div, Entity, FocusHandle, Global, MouseButton, Render, ScrollHandle,
-    SharedString, Window, div, px, svg,
+    SharedString, Window, div,
 };
 use i18n::t;
 use input::{POWERBAR_CONTEXT, PowerbarConfirm, PowerbarNextCategory, PowerbarPrevCategory};
 use router::{Destination, navigate};
 use state::{Hit, Kind, Origin, Playback, Search};
 use ui::{
-    ActiveTheme as _, Dismiss, Input, Modal, SelectNext, SelectPrevious, Submit, Text, eyebrow,
+    ActiveTheme as _, Artwork, Avatar, Dismiss, Input, Modal, SelectNext, SelectPrevious, Submit,
+    Text, eyebrow,
 };
 
 use crate::shared::tracks::{PlaybackStatus, playback_status};
@@ -337,11 +338,7 @@ impl Render for Powerbar {
 
         let mut flat_children: Vec<AnyElement> = Vec::new();
         let mut item_to_child: Vec<usize> = vec![0; items.len()];
-        let total_groups = grouped.len();
         for (g_idx, (kind, group_items)) in grouped.into_iter().enumerate() {
-            let is_last = g_idx + 1 == total_groups;
-            let header_child_idx = flat_children.len();
-            let _ = header_child_idx;
             flat_children.push(
                 div()
                     .px_2()
@@ -368,7 +365,6 @@ impl Render for Powerbar {
                         )
                         .into_any_element(),
                 );
-                let _ = is_last;
             }
         }
         self.item_to_child = item_to_child;
@@ -420,6 +416,15 @@ fn hit_row(hit: &Hit, chosen: bool, theme: &ui::Theme) -> Div {
         false => theme.background,
     };
 
+    let thumb_size = theme.metrics.thumb;
+    let visual = match hit {
+        Hit::Artist(_) => Avatar::new(cover).size(thumb_size).into_any_element(),
+        _ => Artwork::new(cover)
+            .size(thumb_size)
+            .fallback(icon)
+            .into_any_element(),
+    };
+
     div()
         .flex()
         .items_center()
@@ -433,27 +438,7 @@ fn hit_row(hit: &Hit, chosen: bool, theme: &ui::Theme) -> Div {
             true => style,
             false => style.bg(theme.secondary_hover),
         })
-        .child(
-            div()
-                .flex_none()
-                .size(px(36.))
-                .rounded(theme.radius)
-                .overflow_hidden()
-                .bg(theme.secondary)
-                .map(|d| match cover {
-                    Some(url) => d.child(
-                        gpui::img(url)
-                            .size_full()
-                            .object_fit(gpui::ObjectFit::Cover),
-                    ),
-                    None => d.flex().items_center().justify_center().child(
-                        svg()
-                            .path(icons::path(icon))
-                            .size(px(18.))
-                            .text_color(theme.muted_foreground),
-                    ),
-                }),
-        )
+        .child(visual)
         .child(
             div()
                 .flex()
