@@ -1,13 +1,17 @@
 use gpui::prelude::*;
-use gpui::{App, Context, Entity, FocusHandle, Global, Render, SharedString, Window, div, px, svg};
+use gpui::{
+    App, Context, Div, Entity, FocusHandle, Global, MouseButton, Render, SharedString, Window, div,
+    px, svg,
+};
 use i18n::t;
-use input::POWERBAR_CONTEXT;
+use input::{POWERBAR_CONTEXT, PowerbarConfirm, PowerbarNextCategory, PowerbarPrevCategory};
 use router::{Destination, navigate};
-use state::{Hit, Origin, Playback, Search};
-use ui::{ActiveTheme as _, Dismiss, Input, Modal, SelectNext, SelectPrevious, Submit, Text};
+use state::{Hit, Kind, Origin, Playback, Search};
+use ui::{
+    ActiveTheme as _, Dismiss, Input, Modal, SelectNext, SelectPrevious, Submit, Text, eyebrow,
+};
 
 use crate::shared::tracks::{PlaybackStatus, playback_status};
-use input::PowerbarConfirm;
 
 /// Maximum results shown in the powerbar per category.
 const MAX_PER_KIND: usize = 3;
@@ -120,7 +124,6 @@ impl Powerbar {
             return;
         }
 
-        use state::Kind;
         let mut items = Vec::new();
         for kind in Kind::ALL {
             items.extend(search.of(kind).take(MAX_PER_KIND).cloned());
@@ -163,7 +166,61 @@ impl Powerbar {
         }
     }
 
-    /// `Enter` pressed: navigate to the selected (or first) hit's page then close.
+    fn category_starts(&self) -> Vec<usize> {
+        let mut starts = Vec::new();
+        let mut last_kind = None;
+        for (i, hit) in self.items.iter().enumerate() {
+            let kind = hit.kind();
+            if last_kind != Some(kind) {
+                starts.push(i);
+                last_kind = Some(kind);
+            }
+        }
+        starts
+    }
+
+    fn select_next_category(
+        &mut self,
+        _: &PowerbarNextCategory,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let starts = self.category_starts();
+        if starts.is_empty() {
+            return;
+        }
+        let current = self.selected.unwrap_or(0);
+        let next = starts
+            .iter()
+            .copied()
+            .find(|&idx| idx > current)
+            .unwrap_or(starts[0]);
+        self.selected = Some(next);
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    fn select_prev_category(
+        &mut self,
+        _: &PowerbarPrevCategory,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let starts = self.category_starts();
+        if starts.is_empty() {
+            return;
+        }
+        let current = self.selected.unwrap_or(0);
+        let prev = starts
+            .iter()
+            .copied()
+            .rfind(|&idx| idx < current)
+            .unwrap_or(*starts.last().unwrap());
+        self.selected = Some(prev);
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
     fn activate(&mut self, _: &Submit, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(hit) = self.selected_hit().or_else(|| self.items.first().cloned()) {
             navigate_hit(&hit, cx);
@@ -171,7 +228,6 @@ impl Powerbar {
         self.close(window, cx);
     }
 
-    /// `Ctrl + Enter` pressed: play the selected (or first) hit immediately then close.
     fn play_confirm(&mut self, _: &PowerbarConfirm, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(hit) = self.selected_hit().or_else(|| self.items.first().cloned()) {
             play_hit(&hit, &self.playback, cx);
@@ -181,6 +237,15 @@ impl Powerbar {
 
     fn selected_hit(&self) -> Option<Hit> {
         self.selected.and_then(|i| self.items.get(i)).cloned()
+    }
+}
+
+fn category_title(kind: Kind) -> SharedString {
+    match kind {
+        Kind::Song => t!("search-songs"),
+        Kind::Artist => t!("search-artists"),
+        Kind::Album => t!("nav-albums"),
+        Kind::Playlist => t!("nav-playlists"),
     }
 }
 
@@ -241,6 +306,16 @@ impl Render for Powerbar {
         let items = self.items.clone();
         let selected = self.selected;
 
+        let mut grouped: Vec<(Kind, Vec<(usize, Hit)>)> = Vec::new();
+        for (i, hit) in items.iter().enumerate() {
+            let kind = hit.kind();
+            if let Some(group) = grouped.iter_mut().find(|(k, _)| *k == kind) {
+                group.1.push((i, hit.clone()));
+            } else {
+                grouped.push((kind, vec![(i, hit.clone())]));
+            }
+        }
+
         div()
             .absolute()
             .inset_0()
@@ -248,6 +323,8 @@ impl Render for Powerbar {
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_previous))
+            .on_action(cx.listener(Self::select_next_category))
+            .on_action(cx.listener(Self::select_prev_category))
             .on_action(cx.listener(Self::activate))
             .on_action(cx.listener(Self::play_confirm))
             .on_action(cx.listener(|this, _: &Dismiss, window, cx| {
@@ -258,13 +335,40 @@ impl Render for Powerbar {
                 Modal::new("powerbar", t!("powerbar-title"))
                     .w(theme.metrics.cover * 5.0)
                     .child(self.input.clone())
-                    .when(!items.is_empty(), |modal| {
+                    .when(!grouped.is_empty(), |modal| {
+                        let total_groups = grouped.len();
                         modal.child(
-                            div().flex().flex_col().gap(px(2.)).pt_1().children(
-                                items
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(i, hit)| hit_row(hit, selected == Some(i), &theme)),
+                            div().flex().flex_col().pt_1().children(
+                                grouped.into_iter().enumerate().map(
+                                    |(g_idx, (kind, group_items))| {
+                                        let is_last = g_idx + 1 == total_groups;
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.))
+                                            .py_2()
+                                            .when(!is_last, |this| {
+                                                this.border_b_1().border_color(theme.border)
+                                            })
+                                            .child(
+                                                div()
+                                                    .px_2()
+                                                    .pb_1()
+                                                    .child(eyebrow(category_title(kind), cx)),
+                                            )
+                                            .children(group_items.into_iter().map(|(idx, hit)| {
+                                                let is_chosen = selected == Some(idx);
+                                                hit_row(&hit, is_chosen, &theme).on_mouse_down(
+                                                    MouseButton::Left,
+                                                    cx.listener(move |this, _, window, cx| {
+                                                        cx.stop_propagation();
+                                                        navigate_hit(&hit, cx);
+                                                        this.close(window, cx);
+                                                    }),
+                                                )
+                                            }))
+                                    },
+                                ),
                             ),
                         )
                     })
@@ -274,7 +378,7 @@ impl Render for Powerbar {
     }
 }
 
-fn hit_row(hit: &Hit, chosen: bool, theme: &ui::Theme) -> impl IntoElement {
+fn hit_row(hit: &Hit, chosen: bool, theme: &ui::Theme) -> Div {
     let (label, subtitle, cover, icon) = describe_hit(hit);
 
     let bg = match chosen {
@@ -289,7 +393,12 @@ fn hit_row(hit: &Hit, chosen: bool, theme: &ui::Theme) -> impl IntoElement {
         .px_2()
         .py_1()
         .rounded(theme.radius)
+        .cursor_pointer()
         .bg(bg)
+        .hover(|style| match chosen {
+            true => style,
+            false => style.bg(theme.secondary_hover),
+        })
         .child(
             div()
                 .flex_none()

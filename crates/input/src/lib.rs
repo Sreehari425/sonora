@@ -24,7 +24,9 @@ actions!(
         ToggleQueue,
         ToggleLyrics,
         TogglePowerbar,
-        PowerbarConfirm
+        PowerbarConfirm,
+        PowerbarNextCategory,
+        PowerbarPrevCategory
     ]
 );
 
@@ -85,6 +87,8 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("alt-space", TogglePowerbar, None),
         KeyBinding::new("down", SelectNext, Some(POWERBAR_CONTEXT)),
         KeyBinding::new("up", SelectPrevious, Some(POWERBAR_CONTEXT)),
+        KeyBinding::new("tab", PowerbarNextCategory, Some(POWERBAR_CONTEXT)),
+        KeyBinding::new("shift-tab", PowerbarPrevCategory, Some(POWERBAR_CONTEXT)),
         KeyBinding::new("enter", Submit, Some(POWERBAR_CONTEXT)),
         KeyBinding::new("ctrl-enter", PowerbarConfirm, Some(POWERBAR_CONTEXT)),
         KeyBinding::new("cmd-enter", PowerbarConfirm, Some(POWERBAR_CONTEXT)),
