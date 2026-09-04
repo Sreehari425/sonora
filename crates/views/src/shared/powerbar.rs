@@ -1,7 +1,7 @@
 use gpui::prelude::*;
 use gpui::{
-    App, Context, Div, Entity, FocusHandle, Global, MouseButton, Render, SharedString, Window, div,
-    px, svg,
+    AnyElement, App, Context, Div, Entity, FocusHandle, Global, MouseButton, Render, ScrollHandle,
+    SharedString, Window, div, px, svg,
 };
 use i18n::t;
 use input::{POWERBAR_CONTEXT, PowerbarConfirm, PowerbarNextCategory, PowerbarPrevCategory};
@@ -26,6 +26,8 @@ pub(crate) struct Powerbar {
     selected: Option<usize>,
     focus: FocusHandle,
     restore: Option<FocusHandle>,
+    scroll: ScrollHandle,
+    item_to_child: Vec<usize>,
 }
 
 struct Installed(Entity<Powerbar>);
@@ -76,6 +78,8 @@ impl Powerbar {
                     selected: None,
                     focus: cx.focus_handle(),
                     restore: None,
+                    scroll: ScrollHandle::new(),
+                    item_to_child: Vec::new(),
                 }
             });
             cx.set_global(Installed(bar));
@@ -142,10 +146,14 @@ impl Powerbar {
         if self.items.is_empty() {
             return;
         }
-        self.selected = Some(match self.selected {
+        let idx = match self.selected {
             None => 0,
             Some(i) => (i + 1).min(self.items.len() - 1),
-        });
+        };
+        self.selected = Some(idx);
+        if let Some(&child) = self.item_to_child.get(idx) {
+            self.scroll.scroll_to_item(child);
+        }
         window.focus(&self.focus, cx);
         cx.notify();
     }
@@ -155,11 +163,16 @@ impl Powerbar {
             None => {}
             Some(0) => {
                 self.selected = None;
+                self.scroll.scroll_to_item(0);
                 self.input.update(cx, |input, cx| input.focus(window, cx));
                 cx.notify();
             }
             Some(i) => {
-                self.selected = Some(i - 1);
+                let idx = i - 1;
+                self.selected = Some(idx);
+                if let Some(&child) = self.item_to_child.get(idx) {
+                    self.scroll.scroll_to_item(child);
+                }
                 window.focus(&self.focus, cx);
                 cx.notify();
             }
@@ -196,6 +209,9 @@ impl Powerbar {
             .find(|&idx| idx > current)
             .unwrap_or(starts[0]);
         self.selected = Some(next);
+        if let Some(&child) = self.item_to_child.get(next) {
+            self.scroll.scroll_to_item(child);
+        }
         window.focus(&self.focus, cx);
         cx.notify();
     }
@@ -217,6 +233,9 @@ impl Powerbar {
             .rfind(|&idx| idx < current)
             .unwrap_or(*starts.last().unwrap());
         self.selected = Some(prev);
+        if let Some(&child) = self.item_to_child.get(prev) {
+            self.scroll.scroll_to_item(child);
+        }
         window.focus(&self.focus, cx);
         cx.notify();
     }
@@ -316,6 +335,46 @@ impl Render for Powerbar {
             }
         }
 
+        let mut flat_children: Vec<AnyElement> = Vec::new();
+        let mut item_to_child: Vec<usize> = vec![0; items.len()];
+        let total_groups = grouped.len();
+        for (g_idx, (kind, group_items)) in grouped.into_iter().enumerate() {
+            let is_last = g_idx + 1 == total_groups;
+            let header_child_idx = flat_children.len();
+            let _ = header_child_idx;
+            flat_children.push(
+                div()
+                    .px_2()
+                    .pt_2()
+                    .pb_1()
+                    .when(g_idx > 0, |d| d.border_t_1().border_color(theme.border))
+                    .child(eyebrow(category_title(kind), cx))
+                    .into_any_element(),
+            );
+            for (item_idx, hit) in group_items {
+                let child_idx = flat_children.len();
+                item_to_child[item_idx] = child_idx;
+                let is_chosen = selected == Some(item_idx);
+                let hit_clone = hit.clone();
+                flat_children.push(
+                    hit_row(&hit, is_chosen, &theme)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                navigate_hit(&hit_clone, cx);
+                                this.close(window, cx);
+                            }),
+                        )
+                        .into_any_element(),
+                );
+                let _ = is_last;
+            }
+        }
+        self.item_to_child = item_to_child;
+
+        let scroll = self.scroll.clone();
+
         div()
             .absolute()
             .inset_0()
@@ -335,41 +394,16 @@ impl Render for Powerbar {
                 Modal::new("powerbar", t!("powerbar-title"))
                     .w(theme.metrics.cover * 5.0)
                     .child(self.input.clone())
-                    .when(!grouped.is_empty(), |modal| {
-                        let total_groups = grouped.len();
+                    .when(!flat_children.is_empty(), |modal| {
                         modal.child(
-                            div().flex().flex_col().pt_1().children(
-                                grouped.into_iter().enumerate().map(
-                                    |(g_idx, (kind, group_items))| {
-                                        let is_last = g_idx + 1 == total_groups;
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .gap(px(2.))
-                                            .py_2()
-                                            .when(!is_last, |this| {
-                                                this.border_b_1().border_color(theme.border)
-                                            })
-                                            .child(
-                                                div()
-                                                    .px_2()
-                                                    .pb_1()
-                                                    .child(eyebrow(category_title(kind), cx)),
-                                            )
-                                            .children(group_items.into_iter().map(|(idx, hit)| {
-                                                let is_chosen = selected == Some(idx);
-                                                hit_row(&hit, is_chosen, &theme).on_mouse_down(
-                                                    MouseButton::Left,
-                                                    cx.listener(move |this, _, window, cx| {
-                                                        cx.stop_propagation();
-                                                        navigate_hit(&hit, cx);
-                                                        this.close(window, cx);
-                                                    }),
-                                                )
-                                            }))
-                                    },
-                                ),
-                            ),
+                            div()
+                                .id("powerbar-results")
+                                .flex()
+                                .flex_col()
+                                .w_full()
+                                .overflow_y_scroll()
+                                .track_scroll(&scroll)
+                                .children(flat_children),
                         )
                     })
                     .on_dismiss(cx.listener(|this, _, window, cx| this.close(window, cx))),
