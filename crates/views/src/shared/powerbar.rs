@@ -116,6 +116,7 @@ impl Powerbar {
     pub fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open = false;
         self.selected = None;
+        self.input.update(cx, |input, cx| input.set_text("", cx));
         if let Some(focus) = self.restore.take() {
             window.focus(&focus, cx);
         }
@@ -154,20 +155,10 @@ impl Powerbar {
             grouped.push((kind, hits));
         }
 
-        let total_items = flat_idx;
         self.grouped = grouped;
         self.item_to_child = item_to_child;
         self.category_starts = category_starts;
-
-        if let Some(sel) = self.selected
-            && sel >= total_items
-        {
-            self.selected = if total_items == 0 {
-                None
-            } else {
-                Some(total_items - 1)
-            };
-        }
+        self.selected = None;
         cx.notify();
     }
 
@@ -246,13 +237,16 @@ impl Powerbar {
         if self.category_starts.is_empty() {
             return;
         }
+        let Some(&last) = self.category_starts.last() else {
+            return;
+        };
         let current = self.selected.unwrap_or(0);
         let prev = self
             .category_starts
             .iter()
             .copied()
             .rfind(|&idx| idx < current)
-            .unwrap_or(*self.category_starts.last().unwrap());
+            .unwrap_or(last);
         self.selected = Some(prev);
         if let Some(&child) = self.item_to_child.get(prev) {
             self.scroll.scroll_to_item(child);
