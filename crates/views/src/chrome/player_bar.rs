@@ -179,11 +179,12 @@ impl PlayerBar {
             )
     }
 
-    fn side_buttons(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn side_buttons(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = *cx.theme();
-        let settings = self.settings.read(cx);
-        let open = settings.sidebar_right_open();
-        let tab = settings.sidebar_right_tab();
+        let (open, tab) = {
+            let settings = self.settings.read(cx);
+            (settings.sidebar_right_open(), settings.sidebar_right_tab())
+        };
 
         let button = move |id: &'static str, icon: &'static str, hint: &'static str, side| {
             let showing = open && tab == side;
@@ -422,6 +423,11 @@ impl Render for PlayerBar {
             .child(clock_label(total, false))
             .into_any_element();
 
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        let radius = crate::chrome::window_radius(self.settings.read(cx));
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+        let radius: Option<Pixels> = None;
+
         let base = div()
             .flex()
             .w_full()
@@ -429,6 +435,7 @@ impl Render for PlayerBar {
             .flex_none()
             .px_5()
             .when(stacked, |this| this.py_2())
+            .when_some(radius, |this, radius| this.rounded_b(radius))
             .when(!theme.transparent, |this| this.bg(theme.secondary))
             .border_t_1()
             .border_color(theme.border)

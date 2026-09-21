@@ -2,31 +2,31 @@
 
 # Sonora
 
-[![Build](https://img.shields.io/github/actions/workflow/status/sonorahq/sonora/release.yml)](https://github.com/sonorahq/sonora/actions/workflows/release.yml)
-[![License](https://img.shields.io/github/license/sonorahq/sonora)](./COPYING)
-![Installs](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fsonora-stats.nolight.dev%2Fcount&query=%24.count&label=Installs&color=blue)
+[![Build](https://img.shields.io/github/actions/workflow/status/sonorahq/sonora/release.yml?style=flat-square&label=build)](https://github.com/sonorahq/sonora/actions/workflows/release.yml)
+[![License](https://img.shields.io/github/license/sonorahq/sonora?style=flat-square&label=license)](./COPYING)
+![Installs](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fsonora-stats.nolight.dev%2Fcount&query=%24.count&label=Installs&color=blue&style=flat-square)
 \
 [![Discord](https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/a8N8Tx23rV)
 [![Matrix](https://img.shields.io/badge/Matrix-000000?style=for-the-badge&logo=matrix&logoColor=white)](https://matrix.to/#/#sonora:nolight.dev)
 
 ### A native music streaming client, built with Rust and GPUI
 
-Stream Spotify, YouTube Music, and local files all in one **native** app
+Stream from your favorite services and play local files — all in one **native** app.
 </div>
 
 <div align="center">
     <table>
       <tr>
         <td colspan="2">
-          <img width="1602" height="992" alt="image" src="https://github.com/user-attachments/assets/d0357517-a28d-4c90-abd1-4f3e8d8cdedc" />
+          <img width="1613" height="981" alt="image" src="https://github.com/user-attachments/assets/7952a912-7fbc-4186-b467-a08dd7e71e22" />
         </td>
       </tr>
       <tr>
         <td width="50%">
-          <img width="1576" height="945" alt="image" src="https://github.com/user-attachments/assets/70979e4c-261f-4561-b671-04d28a9971a9" />
+          <img width="1623" height="987" alt="image" src="https://github.com/user-attachments/assets/580bf9d6-db85-4fde-b599-82ba2a28cc51" />
         </td>
         <td width="50%">
-          <img width="1576" height="945" alt="image" src="https://github.com/user-attachments/assets/ff3b4284-25e2-4487-bf9b-60d8f56dc44d" />
+          <img width="1623" height="987" alt="image" src="https://github.com/user-attachments/assets/64fcd709-5917-432c-a418-2e07527343d2" />
         </td>
       </tr>
     </table>
@@ -37,18 +37,26 @@ Stream Spotify, YouTube Music, and local files all in one **native** app
     </sub>
 </div>
 
+> [!IMPORTANT]
+> **Sonora is not a piracy tool.**
+>
+> Sonora is not a platform for obtaining or sharing copyrighted material. We will not implement any functions that can be used to export decrypted streams, DRM licenses, content keys, or to convert protected streams into media files.
+>
+> Sonora is not designed to circumvent subscriptions or other restrictions put in place by music streaming platforms. If the service demands that you have a valid subscription in order to play back their tracks, so will Sonora.
+>
+> Features aimed at ripping, downloading, distributing, or gaining access to protected streaming content are out of scope for the project.
+
 ## Features
 
-- **Spotify**, **YouTube**, and local playback
-- Library management within supported providers
-- Gapless playback
-- Audio normalization
-- Synced/karaoke lyrics
-- Romanization
-- Cross-platform support
-- Custom themes
+* **Apple Music, Spotify, YouTube Music, Deezer, Subsonic/Navidrome** and local playback
+* Gapless playback, audio normalization, shuffle, sleep timer
+* Synced/karaoke lyrics, background vocals, and romanization
+* Scrobbling with LastFM, ListenBrainz, LibreFM, and Maloja
+* Themes, fonts, icons, transparency, blur, and window styling
+* Discord Rich Presence, native file opening
+* macOS, Windows, Linux, and (probably) FreeBSD support
 
-## Install
+## Installation
 
 ### macOS
 
@@ -85,31 +93,44 @@ Either `pipewire-alsa` or `pulseaudio-alsa` is required, matching your sound ser
 
 #### Flatpak
 
-Add the Sonora repository once; it pulls the runtime from Flathub and updates with `flatpak update`:
+Add the Sonora repository (updates with `flatpak update`):
 
 ```sh
 flatpak install --user https://sonorahq.github.io/sonora/sonora.flatpakref
 ```
 
-A remote added before the move to the `sonorahq` organisation still points at the old address and
-fails to update. Point it at the new one once:
+#### AppImage
+
+Download the `x86_64` AppImage from the
+[latest release](https://github.com/sonorahq/sonora/releases/latest), make it executable and run
+it:
 
 ```sh
-flatpak remote-modify --user --url=https://sonorahq.github.io/sonora/repo sonora
+chmod +x sonora-*.AppImage
+./sonora-*.AppImage
 ```
 
-Every release also attaches a standalone `.flatpak` bundle for x86_64 and aarch64 on
-[Releases](https://github.com/sonorahq/sonora/releases/latest), for installing without a remote.
+An `aarch64` build is published beside it. The AppImage carries no Vulkan driver and no ALSA
+bridge, so both still come from your system. It does not update itself, but it carries its update
+information, so [AppImageUpdate](https://github.com/AppImageCommunity/AppImageUpdate) or an
+AppImage manager such as [AppManager](https://github.com/kem-a/AppManager) can fetch a new release
+for you.
 
 ### Nix
 
-The flake packages the latest tagged release and exposes `programs.sonora` for Home Manager.
+The flake packages the latest tagged release binary or builds from source if unavailable for your platform.
 
 ```nix
 inputs.sonora.url = "github:sonorahq/sonora";
 ```
 
-Home Manager:
+```text
+inputs.sonora.packages.${system}.default
+inputs.sonora.packages.${system}.sonora (build from source)
+inputs.sonora.packages.${system}.sonora-bin (prebuilt, if available)
+```
+
+You can set configuration options via the included Home Manager module under `programs.sonora`:
 
 ```nix
 {
@@ -128,7 +149,9 @@ Home Manager:
 
 #### Installer
 
-Download and run the [installer](https://github.com/sonorahq/sonora/releases/latest/download/Sonora-Setup.exe).
+Download and run the [installer](https://github.com/sonorahq/sonora/releases/latest/download/Sonora-Setup.exe),
+or the [ARM installer](https://github.com/sonorahq/sonora/releases/latest/download/Sonora-Setup-arm64.exe)
+on Windows on ARM.
 
 #### Portable
 
@@ -164,17 +187,19 @@ AI-assisted proofreading and translation of human-written text are permitted.
 
 | Language | Translated | Coverage |
 | --- | --- | --- |
-| English (`en-US`) | 533/533 | 100% |
-| Deutsch (`de`) | 533/533 | 100% |
-| Español (`es`) | 510/533 | 96% |
-| Français (`fr`) | 492/533 | 92% |
-| Italiano (`it`) | 489/533 | 92% |
-| Bahasa Indonesia (`id`) | 527/533 | 99% |
-| 日本語 (`ja`) | 510/533 | 96% |
-| Русский (`ru`) | 500/533 | 94% |
-| Українська (`uk`) | 500/533 | 94% |
-| Polski (`pl`) | 531/533 | 100% |
-| Português (Brasil) (`pt-BR`) | 510/533 | 96% |
+| English (`en-US`) | 720/720 | 100% |
+| Deutsch (`de`) | 631/720 | 88% |
+| Español (`es`) | 691/720 | 96% |
+| Français (`fr`) | 631/720 | 88% |
+| Italiano (`it`) | 609/720 | 85% |
+| Bahasa Indonesia (`id`) | 609/720 | 85% |
+| 日本語 (`ja`) | 609/720 | 85% |
+| Русский (`ru`) | 711/720 | 99% |
+| Українська (`uk`) | 711/720 | 99% |
+| Polski (`pl`) | 711/720 | 99% |
+| Português (Brasil) (`pt-BR`) | 609/720 | 85% |
+| 简体中文 (`zh-CN`) | 609/720 | 85% |
+| Türkçe (`tr`) | 609/720 | 85% |
 
 <!-- i18n:end -->
 
@@ -195,6 +220,9 @@ Sonora is built with the help of some incredible open-source projects, including
 - [Zed](https://github.com/zed-industries/zed) — a wonderful editor (~~ab~~)used by all core team members. Conveniently provides `gpui` — their native Rust rendering stack.
 - [librespot](https://github.com/librespot-org/librespot) — Spotify playback and library integration.
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) — certain YouTube ideas implemented in [ytmusic-rs](https://github.com/sonorahq/ytmusic-rs) :)
+
+## Code signing
+Sonora has applied for code signing through SignPath Foundation. Current releases are not yet signed through SignPath Foundation. If approved, signed releases will use free code signing provided by SignPath.io, with a certificate by SignPath Foundation.
 
 ## License
 

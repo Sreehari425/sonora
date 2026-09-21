@@ -1,6 +1,11 @@
+pub mod apple;
 mod audio;
 pub mod binimum;
 pub mod credentials;
+pub mod deezer;
+pub mod drm;
+pub mod engine;
+pub mod equalizer;
 pub mod kugou;
 #[cfg(test)]
 mod live_tests;
@@ -10,21 +15,30 @@ pub mod lyrics;
 mod models;
 pub mod musixmatch;
 pub mod netease;
+pub mod progress;
+pub mod scrobble;
+mod sink;
 mod spectrum;
 pub mod spotify;
+mod stream;
+pub mod subsonic;
+mod trim;
+pub mod trouble;
 pub mod youtube;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
 
+pub use equalizer::Equalizer;
 pub use models::{
-    Album, AlbumDetail, Artist, ArtistProfile, ArtistRef, Contributor, Credit, Genre, GenreDetail,
-    GenreItem, GenreSection, HomeFeed, Lyrics, LyricsHit, LyricsLane, LyricsLine, LyricsQuery,
+    Album, AlbumDetail, Artist, ArtistCatalogue, ArtistProfile, ArtistRef, Contributor, Credit,
+    Genre, GenreDetail, GenreItem, GenreSection, HomeFeed, LibraryItem, LibraryItemKind,
+    LibraryOrder, LibraryPinResult, Lyrics, LyricsHit, LyricsLane, LyricsLine, LyricsQuery,
     LyricsWord, Playlist, PlaylistDetail, ReleaseType, RomanizedText, SavedArtist, Track, TrackKey,
     TrackTags, UserDetail, UserProfile, Voice, WritingSystem,
 };
@@ -78,12 +92,40 @@ pub trait MusicApi: Send + Sync {
     }
 
     async fn artist(&self, artist_id: &str) -> Result<Artist>;
+
+    /// The rest of an artist page, fetched once `artist` has put the overview up: the whole
+    /// discography and the popular tracks that only the discography can rank. `known` is the
+    /// top tracks already on the page, so the provider can rank around them. A provider whose
+    /// `artist` already answers with everything leaves the default, which is nothing more to
+    /// fetch.
+    async fn artist_catalogue(
+        &self,
+        _artist_id: &str,
+        _known: &[Track],
+    ) -> Result<ArtistCatalogue> {
+        Ok(ArtistCatalogue::default())
+    }
+
     async fn artist_profile(&self, artist_id: &str) -> Result<ArtistProfile>;
     async fn artist_images(&self, ids: Vec<String>) -> Result<HashMap<String, String>>;
-    async fn saved_tracks(&self, limit: u32) -> Result<Vec<Track>>;
 
-    async fn all_tracks(&self, limit: u32) -> Result<Vec<Track>> {
-        self.saved_tracks(limit).await
+    /// The tracks the user starred. On a `Shape::Saved` provider this is the whole songs
+    /// library; on a `Shape::Catalog` one it only feeds the hearts and the favorites filter.
+    async fn saved_tracks(&self) -> Result<Vec<Track>>;
+
+    /// The favorites a page at a time, for a library page that shows its first rows while the
+    /// rest arrive. A provider that lists in one go leaves the default, which is one page.
+    async fn saved_tracks_paged(&self) -> Result<Pages<Track>> {
+        Ok(whole(self.saved_tracks().await?))
+    }
+
+    /// Every track the provider has. Only a `Shape::Catalog` provider answers.
+    async fn all_tracks(&self) -> Result<Vec<Track>> {
+        Ok(Vec::new())
+    }
+
+    async fn all_tracks_paged(&self) -> Result<Pages<Track>> {
+        Ok(whole(self.all_tracks().await?))
     }
 
     async fn set_track_saved(&self, track_id: &str, saved: bool) -> Result<()>;
@@ -97,29 +139,98 @@ pub trait MusicApi: Send + Sync {
         anyhow::bail!("this provider cannot edit tags")
     }
     async fn track(&self, track_id: &str) -> Result<Track>;
+
+    /// Reads an arbitrary file on disk as a track, for a provider whose tracks are files. Used
+    /// by file-association opens, which may point outside any scanned folder.
+    async fn track_from_path(&self, _path: &Path) -> Result<Track> {
+        anyhow::bail!("cannot open arbitrary files")
+    }
+
+    /// Delete a track file from disk (only for local provider)
+    async fn delete_track_file(&self, _track_id: &str) -> Result<()> {
+        anyhow::bail!("this provider does not support file deletion")
+    }
     async fn track_playcount(&self, track_id: &str) -> Result<Option<u64>>;
-    async fn track_lyrics(&self, _track_id: &str) -> Result<Option<Lyrics>> {
+    async fn playlists(&self) -> Result<Vec<Playlist>>;
+    /// Change a provider's own library pin, rather than a local sidebar shortcut.
+    async fn set_library_item_pinned(&self, _uri: &str, _pinned: bool) -> Result<LibraryPinResult> {
+        anyhow::bail!("library pinning is not supported")
+    }
+
+    /// The provider's mixed library, including pins and its recent-play ordering.
+    /// None means this provider exposes only the separate saved collections.
+    async fn library_items(&self, _order: LibraryOrder) -> Result<Option<Vec<LibraryItem>>> {
         Ok(None)
     }
-    async fn playlists(&self, limit: u32) -> Result<Vec<Playlist>>;
     async fn create_playlist(&self, name: &str) -> Result<String>;
     async fn rename_playlist(&self, playlist_id: &str, name: &str) -> Result<()>;
     async fn delete_playlist(&self, playlist_id: &str) -> Result<()>;
     async fn remove_playlist_from_library(&self, playlist_id: &str) -> Result<()>;
     async fn add_playlist_to_library(&self, playlist_id: &str) -> Result<()>;
+
+    /// Puts a track or an album into the listener's library, or takes it out, on a provider
+    /// whose library is apart from its favorites. Only a `Capabilities::library` provider
+    /// answers. An artist is never added: a library artist is one whose music is there.
+    async fn set_in_library(&self, _kind: MediaKind, _id: &str, _present: bool) -> Result<()> {
+        anyhow::bail!("this provider has no library apart from its favorites")
+    }
     async fn set_playlist_public(&self, playlist_id: &str, public: bool) -> Result<()>;
     async fn add_track_to_playlist(&self, playlist_id: &str, track_id: &str) -> Result<()>;
     async fn remove_track_from_playlist(&self, playlist_id: &str, track_id: &str) -> Result<()>;
-    async fn saved_albums(&self, limit: u32) -> Result<Vec<Album>>;
+    async fn saved_albums(&self) -> Result<Vec<Album>>;
+
+    /// Every album the provider has. Only a `Shape::Catalog` provider answers.
+    async fn all_albums(&self) -> Result<Vec<Album>> {
+        Ok(Vec::new())
+    }
+
+    async fn saved_albums_paged(&self) -> Result<Pages<Album>> {
+        Ok(whole(self.saved_albums().await?))
+    }
+
+    async fn all_albums_paged(&self) -> Result<Pages<Album>> {
+        Ok(whole(self.all_albums().await?))
+    }
+
     async fn set_album_saved(&self, album_id: &str, saved: bool) -> Result<()>;
-    async fn saved_artists(&self, limit: u32) -> Result<Vec<SavedArtist>>;
+    async fn saved_artists(&self) -> Result<Vec<SavedArtist>>;
+
+    /// Every artist the provider has. Only a `Shape::Catalog` provider answers.
+    async fn all_artists(&self) -> Result<Vec<SavedArtist>> {
+        Ok(Vec::new())
+    }
+
+    async fn saved_artists_paged(&self) -> Result<Pages<SavedArtist>> {
+        Ok(whole(self.saved_artists().await?))
+    }
+
+    async fn all_artists_paged(&self) -> Result<Pages<SavedArtist>> {
+        Ok(whole(self.all_artists().await?))
+    }
+
     async fn set_artist_saved(&self, artist_id: &str, saved: bool) -> Result<()>;
     async fn album(&self, album_id: &str) -> Result<AlbumDetail>;
     async fn album_tracks(&self, album_id: &str) -> Result<Vec<Track>>;
     async fn playlist(&self, playlist_id: &str) -> Result<PlaylistDetail>;
+    async fn playlist_continuation(
+        &self,
+        _continuation: &str,
+    ) -> Result<(Vec<Track>, Option<String>)> {
+        anyhow::bail!("playlist pagination is not supported")
+    }
+
     async fn playlist_tracks(&self, playlist_id: &str) -> Result<Vec<Track>>;
     async fn playlist_covers(&self, playlist_id: &str, wanted: usize) -> Result<Vec<String>>;
-    async fn track_radio(&self, track_id: &str) -> Result<Vec<Track>>;
+    /// The station seeded by `track_id`, from its start or from `from`, a continuation an
+    /// earlier call answered with. The continuation that comes back fetches the next stretch,
+    /// and `None` means the provider has no more. A provider that serves a station in one go
+    /// ignores `from` and answers `None`, which it is then never handed.
+    async fn track_radio(
+        &self,
+        track_id: &str,
+        from: Option<&str>,
+    ) -> Result<(Vec<Track>, Option<String>)>;
+
     async fn search(&self, query: &str) -> Result<Vec<Track>>;
 
     async fn search_albums(&self, _query: &str) -> Result<Vec<Album>> {
@@ -132,6 +243,13 @@ pub trait MusicApi: Send + Sync {
 
     async fn home(&self) -> Result<HomeFeed> {
         Ok(HomeFeed::default())
+    }
+
+    /// The home feed as it fills, so a page draws its first shelves before its last have
+    /// arrived. Defaults to `home` delivered at once, so a provider that has the feed in one go
+    /// writes nothing.
+    async fn home_paged(&self) -> Result<Feed> {
+        Ok(at_once(self.home().await?))
     }
 
     async fn name_home_playlists(&self, sections: Vec<GenreSection>) -> Vec<GenreSection> {
@@ -153,14 +271,19 @@ pub trait LyricsProvider: Send + Sync {
     async fn search(&self, query: &LyricsQuery) -> Result<Vec<LyricsHit>>;
 }
 
-#[derive(Clone, Copy, Debug)]
+/// What an engine is started with. `equalizer` is shared rather than copied: the engine keeps
+/// reading it, so a change reaches the output without a restart.
+#[derive(Clone, Debug)]
 pub struct PlaybackConfig {
     pub normalisation: bool,
     pub gapless: bool,
     pub position_interval: Duration,
     pub gain: f32,
+    pub equalizer: Equalizer,
 }
 
+/// What an engine reports back. `Playing` and `Seeked` mean audio from `at` is reaching the
+/// output, not that a decoder is ready, so whatever follows the sound can start on them.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PlaybackEvent {
     Loading {
@@ -175,7 +298,14 @@ pub enum PlaybackEvent {
         id: Option<String>,
         at: Duration,
     },
+    /// A progress report from the decoder. It runs ahead of what is audible by whatever the
+    /// output has queued, and none arrive while the engine is busy with a seek.
     Position {
+        id: Option<String>,
+        at: Duration,
+    },
+    /// Audio from the new position has reached the output after a seek.
+    Seeked {
         id: Option<String>,
         at: Duration,
     },
@@ -201,6 +331,7 @@ impl PlaybackEvent {
             | Self::Playing { id, .. }
             | Self::Paused { id, .. }
             | Self::Position { id, .. }
+            | Self::Seeked { id, .. }
             | Self::Length { id, .. }
             | Self::Ended { id, .. }
             | Self::Unavailable { id, .. } => id.as_deref(),
@@ -209,19 +340,24 @@ impl PlaybackEvent {
     }
 }
 
+/// Transport control of one engine. Every call is fire-and-forget: the outcome arrives as a
+/// `PlaybackEvent`, never as a return value.
 pub trait Player: Send + Sync {
-    fn load(&self, track_id: &str, seamless: bool) -> Result<()>;
+    /// Fetches a track and plays it from `at`. A `seamless` load is a queue segue: a gapless
+    /// engine keeps what it has queued so the join has no gap, any other load drops it.
+    fn load(&self, track_id: &str, at: Duration, seamless: bool) -> Result<()>;
 
-    fn load_paused_at(&self, track_id: &str, at: Duration) -> Result<()> {
-        self.load(track_id, false)?;
-        self.pause();
-        self.seek(at);
-        Ok(())
-    }
+    /// Fetches a track and leaves it paused at `at`, ready for `play`.
+    fn load_paused_at(&self, track_id: &str, at: Duration) -> Result<()>;
 
+    /// Fetches a track ahead of time so a later `load` starts at once. `segue` marks the next
+    /// queue item, which a gapless engine may already line up behind the current one.
     fn preload(&self, track_id: &str, segue: bool) -> Result<()>;
     fn play(&self);
     fn pause(&self);
+
+    /// Moves to `position`. While loading, the track starts there instead; while playing, a
+    /// `Seeked` event follows once audio from there reaches the output.
     fn seek(&self, position: Duration);
     fn set_gain(&self, gain: f32);
 
@@ -239,12 +375,70 @@ pub trait PlaybackFactory: Send + Sync {
     fn start(&self, config: PlaybackConfig) -> (Box<dyn Player>, Box<dyn PlaybackEvents>);
 }
 
+/// What a provider's library is made of. It decides which `MusicApi` methods fill the library
+/// pages and whether a favorites filter is offered on them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Shape {
+    /// The library is what the user starred, read through the `saved_*` methods.
+    Saved,
+    /// The library is everything the provider has, read through the `all_*` methods, with the
+    /// `saved_*` set drawn on top as hearts and a filter.
+    Catalog,
+}
+
+/// What a provider can do beyond listing and playing, so a control it has no answer for is
+/// never put in front of the listener.
+///
+/// This is about the service, not the account: something a provider simply does not have, like
+/// a station Apple Music will not list or a play count Deezer does not keep. A capability that
+/// is off hides its button, its menu item and its column, rather than showing one that fails
+/// when pressed. A provider that gains one flips a flag here and the UI follows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Capabilities {
+    /// The listener can follow and unfollow an artist.
+    pub follow_artists: bool,
+    /// A track can seed a station, which is what fills the queue behind it.
+    pub radio: bool,
+    /// Tracks carry a play count worth a column of its own.
+    pub playcounts: bool,
+    /// The listener has a library apart from their favorites, which a track or an album can be
+    /// put into and taken out of through `set_in_library`. Off where the library is the
+    /// favorites, as on Spotify, and where it is fixed, as on a self-hosted server.
+    pub library: bool,
+    /// The provider keeps sidebar pins of its own, listed by `library_items` and changed
+    /// through `set_library_item_pinned`. Off, a pin lives in Sonora's settings alone.
+    pub pins: bool,
+}
+
+impl Capabilities {
+    /// What a full streaming service offers. A library apart from favorites is not among
+    /// them: on most services the two are one thing. We love Apple Music. Pins of the
+    /// provider's own are not either, since only Spotify keeps any.
+    pub const ALL: Self = Self {
+        follow_artists: true,
+        radio: true,
+        playcounts: true,
+        library: false,
+        pins: false,
+    };
+
+    /// Nothing beyond listing and playing.
+    pub const NONE: Self = Self {
+        follow_artists: false,
+        radio: false,
+        playcounts: false,
+        library: false,
+        pins: false,
+    };
+}
+
 pub struct ProviderSession {
     pub profile: UserProfile,
     pub api: Arc<dyn MusicApi>,
     pub playback: Arc<dyn PlaybackFactory>,
+    pub shape: Shape,
     pub authenticated: bool,
-    pub playcounts: bool,
+    pub capabilities: Capabilities,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -252,7 +446,12 @@ pub enum SignIn {
     Default,
     Anonymous,
     Secret,
-    Path(PathBuf),
+    Path(Vec<PathBuf>),
+    Credentials {
+        server: String,
+        username: String,
+        password: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -302,14 +501,99 @@ pub enum SignInPrompt {
 pub type PromptSink = Arc<dyn Fn(SignInPrompt) + Send + Sync>;
 pub type InputSource = tokio::sync::mpsc::UnboundedReceiver<String>;
 
+/// One page of a listing that arrives in pieces. `total` is how long the whole listing will
+/// be, on the pages of a provider that knows before the last one; a page that does not know
+/// carries `None`, and the count so far stands in.
+pub struct Page<T> {
+    pub total: Option<usize>,
+    pub items: Vec<T>,
+}
+
+/// A listing arriving a page at a time, in order. The channel closes after the last page, or
+/// carries the error a page broke on, after which nothing more comes. Dropping it stops the
+/// provider fetching.
+pub type Pages<T> = tokio::sync::mpsc::Receiver<Result<Page<T>>>;
+
+/// The home feed arriving a lot at a time: every message is the whole feed so far, arranged
+/// the way the provider wants it drawn, so each one can replace the last on the page. The
+/// channel closes after the last lot, or carries the error one broke on, after which nothing
+/// more comes. Dropping it stops the provider fetching.
+pub type Feed = tokio::sync::mpsc::Receiver<Result<HomeFeed>>;
+
+/// A home feed that arrived whole, as its one and only message.
+pub fn at_once(feed: HomeFeed) -> Feed {
+    let (sender, receiver) = tokio::sync::mpsc::channel(1);
+    // Room for one message was made above, so this never waits and never fails.
+    sender.try_send(Ok(feed)).ok();
+    receiver
+}
+
+/// A listing that arrived whole, as its one and only page. What a provider that lists in one
+/// go answers the paged calls with.
+pub fn whole<T: Send + 'static>(items: Vec<T>) -> Pages<T> {
+    let (sender, receiver) = tokio::sync::mpsc::channel(1);
+    let total = Some(items.len());
+    // Room for one page was made above, so this never waits and never fails.
+    sender.try_send(Ok(Page { total, items })).ok();
+    receiver
+}
+
+/// A cookie sign-in the app runs in its own browser window. `url` opens first and `landing` scopes
+/// URL-based cookie reads. The user is through once the cookies for `domain` carry one of the
+/// `proof` names. The header those cookies make is what `SignInPrompt::Secret` then receives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WebSignIn {
+    pub url: &'static str,
+    pub landing: &'static str,
+    pub domain: &'static str,
+    pub proof: &'static [&'static str],
+    /// A user agent the window presents instead of its default. Some providers' anti-bot
+    /// checks reject an agent that does not match the engine behind it (a Firefox string on a
+    /// WebKit window); the string must match what the backend's engine would say. Backends
+    /// whose default is already engine-consistent may ignore it.
+    pub agent: Option<&'static str>,
+}
+
 #[async_trait]
 pub trait MusicProvider: Send + Sync {
     fn name(&self) -> &'static str;
     fn slug(&self) -> &'static str;
+
+    /// Forgets whatever the provider remembers about its last scan, so the next one reads
+    /// everything again. Only a provider that scans files has anything to forget, and only a
+    /// rescan the user asked for should ask it to.
+    fn forget_scan(&self) {}
     fn sign_in_options(&self) -> Vec<SignIn>;
     fn stored(&self) -> bool;
+    /// Whether what is stored is an anonymous session rather than an account, so a caller
+    /// can tell the two apart. A provider without an anonymous sign-in never says yes.
+    fn stored_guest(&self) -> bool {
+        false
+    }
     fn location(&self) -> Option<String> {
         None
+    }
+    /// The host to open a connection to when checking whether the network is back. `None`
+    /// where the provider needs no network, which is what keeps a local library from ever
+    /// looking for one.
+    fn reach(&self) -> Option<String> {
+        None
+    }
+    /// What a status calls this provider after "listening to". A service answers with its own
+    /// name; one that is only the user's own files says what the files are instead.
+    fn listening_to(&self) -> &'static str {
+        self.name()
+    }
+    /// Whether this provider's tracks need the Widevine module to play. The app fetches the
+    /// module once such a provider has an account, and does not go near it otherwise.
+    fn protected(&self) -> bool {
+        false
+    }
+    /// Whether the artwork urls this provider hands out can be given to another service. A path
+    /// on disk means nothing elsewhere, and a self-hosted url carries the credentials that fetch
+    /// it, so the default is no.
+    fn public_art(&self) -> bool {
+        false
     }
     async fn restore(&self) -> Result<Option<ProviderSession>>;
     async fn sign_in(
@@ -320,4 +604,9 @@ pub trait MusicProvider: Send + Sync {
     ) -> Result<ProviderSession>;
     fn abandon(&self) {}
     fn sign_out(&self);
+    /// How to run `SignIn::Secret` in a browser window. `None` means the provider has no cookie
+    /// sign-in, and the app offers no `Secret` option for it.
+    fn web_sign_in(&self) -> Option<WebSignIn> {
+        None
+    }
 }

@@ -1,20 +1,24 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Error;
 use gpui::{Context, Entity, EventEmitter, Task};
+use i18n::t;
 use music::{
-    MusicApi, MusicProvider, PlaybackFactory, PromptSink, ProviderSession, SignIn, SignInFailure,
-    SignInProblem, SignInPrompt, UserProfile,
+    Capabilities, MusicApi, MusicProvider, PlaybackFactory, PromptSink, ProviderSession, Shape,
+    SignIn, SignInFailure, SignInProblem, SignInPrompt, UserProfile,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::Shelf;
 use crate::catalog::CatalogSource;
 use crate::settings::AppSettings;
-use crate::{Io, join};
+use crate::{Io, Network, join};
 
 const HEARTBEAT: Duration = Duration::from_secs(30);
+/// How often the sign-in window is asked whether the user is through.
+const WINDOW_POLL: Duration = Duration::from_millis(300);
 const BACKOFF: [Duration; 5] = [
     Duration::ZERO,
     Duration::from_secs(5),
@@ -32,9 +36,11 @@ pub struct Failure {
 
 impl Failure {
     fn new(error: &Error) -> Self {
+        let reason = format!("{error:#}");
         let problem = error
             .downcast_ref::<SignInFailure>()
-            .map(|failure| failure.0);
+            .map(|failure| failure.0)
+            .or_else(|| music::trouble::offline(&reason).then_some(SignInProblem::Network));
         let detail = error
             .chain()
             .skip(1)
@@ -46,6 +52,12 @@ impl Failure {
             detail: (!detail.is_empty()).then(|| detail.join(": ")),
         }
     }
+
+    /// Whether the sign-in failed because there was no network, rather than because the account
+    /// was refused. A provider that was only unreachable is still the user's.
+    pub fn offline(&self) -> bool {
+        self.problem == Some(SignInProblem::Network)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,6 +66,10 @@ pub enum SessionState {
     Restoring,
     Authorizing(Option<SignInPrompt>),
     SignedIn(UserProfile),
+    /// The stored account could not be reached. It is still the user's, so nothing is signed
+    /// out: the app stays on whatever the library kept and on the local files, and tries the
+    /// account again by itself once the network is back.
+    Offline(Failure),
     Failed(Failure),
 }
 
@@ -64,11 +80,21 @@ pub enum SessionEvent {
     LocalChanged,
 }
 
+#[derive(Clone, Copy)]
+enum SecretInput {
+    Browser,
+    Manual,
+}
+
 pub struct ProviderInfo {
     pub slug: &'static str,
     pub name: &'static str,
     pub options: Vec<SignIn>,
+    pub web_sign_in: bool,
+    pub protected: bool,
     pub stored: bool,
+    /// Whether what is stored is an anonymous session rather than an account.
+    pub guest: bool,
     pub active: bool,
     pub pending: bool,
     pub error: Option<Failure>,
@@ -85,18 +111,25 @@ pub struct Session {
     client: Option<Arc<dyn MusicApi>>,
     catalog: Option<Arc<CatalogSource>>,
     playback: Option<Arc<dyn PlaybackFactory>>,
+    shape: Shape,
     authenticated: bool,
-    playcounts: bool,
+    capabilities: Capabilities,
     io: Io,
     task: Option<Task<()>>,
     prompt_task: Option<Task<()>>,
     input: Option<UnboundedSender<String>>,
+    /// The browser window a `SignInPrompt::Secret` opened, while it is up.
+    window: Option<webview::Login>,
+    window_task: Option<Task<()>>,
     local_provider: Arc<dyn MusicProvider>,
-    local_folder: Option<PathBuf>,
+    local_folders: Vec<PathBuf>,
     local_client: Option<Arc<dyn MusicApi>>,
     local_catalog: Option<Arc<CatalogSource>>,
     local_playback: Option<Arc<dyn PlaybackFactory>>,
+    local_capabilities: Capabilities,
     local_task: Option<Task<()>>,
+    /// Whether a local scan is under way, so the UI can show its progress.
+    scanning: bool,
     watch: Option<Task<()>>,
     reconnect: Option<Task<()>>,
     reconnecting: bool,
@@ -114,7 +147,7 @@ impl Session {
         cx: &mut Context<Self>,
     ) -> Self {
         let remembered = settings.read(cx).provider().to_string();
-        let local_folder = settings.read(cx).local_folder().map(PathBuf::from);
+        let local_folders = settings.read(cx).local_folders().to_vec();
         let active = providers
             .iter()
             .position(|provider| provider.slug() == remembered);
@@ -129,18 +162,23 @@ impl Session {
             client: None,
             catalog: None,
             playback: None,
+            shape: Shape::Saved,
             authenticated: false,
-            playcounts: false,
+            capabilities: Capabilities::NONE,
             io,
             task: None,
             prompt_task: None,
             input: None,
+            window: None,
+            window_task: None,
             local_provider,
-            local_folder,
+            local_folders,
             local_client: None,
             local_catalog: None,
             local_playback: None,
+            local_capabilities: Capabilities::NONE,
             local_task: None,
+            scanning: false,
             watch: None,
             reconnect: None,
             reconnecting: false,
@@ -166,6 +204,22 @@ impl Session {
         self.local_client.clone()
     }
 
+    /// The client serving a shelf, if that shelf has a provider right now.
+    pub fn client_of(&self, shelf: Shelf) -> Option<Arc<dyn MusicApi>> {
+        match shelf {
+            Shelf::Streaming => self.client.clone(),
+            Shelf::Local => self.local_client.clone(),
+        }
+    }
+
+    /// What a shelf's library is made of. The local shelf is always a catalog.
+    pub fn shape_of(&self, shelf: Shelf) -> Shape {
+        match shelf {
+            Shelf::Streaming => self.shape,
+            Shelf::Local => Shape::Catalog,
+        }
+    }
+
     pub(crate) fn catalog(&self, id: &str) -> Option<Arc<CatalogSource>> {
         match music::is_local_id(id) {
             true => self.local_catalog.clone(),
@@ -177,10 +231,11 @@ impl Session {
         self.local_playback.clone()
     }
 
-    pub fn local_path(&self) -> Option<String> {
-        self.local_folder
-            .as_ref()
+    pub fn local_paths(&self) -> Vec<String> {
+        self.local_folders
+            .iter()
             .map(|path| path.display().to_string())
+            .collect()
     }
 
     pub fn providers(&self) -> impl Iterator<Item = ProviderInfo> + '_ {
@@ -191,7 +246,12 @@ impl Session {
                 slug: provider.slug(),
                 name: provider.name(),
                 options: provider.sign_in_options(),
+                // Asked in this order because answering `supported` costs a library load on
+                // Linux, and only a provider that signs in with cookies is worth it.
+                web_sign_in: provider.web_sign_in().is_some() && webview::supported(),
+                protected: provider.protected(),
                 stored: provider.stored(),
+                guest: provider.stored_guest(),
                 active: self.active == Some(index),
                 pending: self.awaiting == Some(index),
                 error: match &self.error {
@@ -203,6 +263,17 @@ impl Session {
 
     pub fn connected(&self) -> impl Iterator<Item = ProviderInfo> + '_ {
         self.providers().filter(|info| info.stored)
+    }
+
+    /// Whether the current provider's tracks need the Widevine module and it has an account.
+    /// A protected provider the user signed into but is not on right now does not count, so
+    /// nothing about the module is looked for or shown until they switch to it.
+    pub fn wants_drm(&self) -> bool {
+        let Some(index) = self.active else {
+            return false;
+        };
+        let provider = &self.providers[index];
+        provider.protected() && provider.stored()
     }
 
     pub fn forget(&mut self, slug: &str, cx: &mut Context<Self>) {
@@ -249,6 +320,12 @@ impl Session {
         Some(provider.slug())
     }
 
+    /// The host to try when checking whether the network is back. It is the active provider's
+    /// own, so the check never touches a service the app is not already using.
+    pub fn reach(&self) -> Option<String> {
+        self.providers.get(self.active?)?.reach()
+    }
+
     pub fn local_slug(&self) -> &'static str {
         self.local_provider.slug()
     }
@@ -265,9 +342,14 @@ impl Session {
     }
 
     pub fn slug_for(&self, id: &str) -> Option<&'static str> {
+        self.provider_for(id).map(|provider| provider.slug())
+    }
+
+    /// The provider an id belongs to, whichever shelf it sits on.
+    pub(crate) fn provider_for(&self, id: &str) -> Option<&dyn MusicProvider> {
         match music::is_local_id(id) {
-            true => Some(self.local_slug()),
-            false => self.provider_slug(),
+            true => Some(self.local_provider.as_ref()),
+            false => self.active.map(|index| self.providers[index].as_ref()),
         }
     }
 
@@ -275,8 +357,19 @@ impl Session {
         self.authenticated
     }
 
-    pub fn playcounts(&self) -> bool {
-        self.playcounts
+    /// What the live streaming provider can do beyond listing and playing. Nothing is offered
+    /// while signed out, which is what the empty set means.
+    pub fn capabilities(&self) -> Capabilities {
+        self.capabilities
+    }
+
+    /// The same, for whichever shelf a thing belongs to. Anything that routes by id asks this
+    /// one, since the two shelves can differ: local files keep favorites but seed no station.
+    pub fn capabilities_of(&self, shelf: Shelf) -> Capabilities {
+        match shelf {
+            Shelf::Streaming => self.capabilities,
+            Shelf::Local => self.local_capabilities,
+        }
     }
 
     pub fn is_pending(&self) -> bool {
@@ -318,6 +411,20 @@ impl Session {
     }
 
     pub fn sign_in(&mut self, slug: &str, method: SignIn, cx: &mut Context<Self>) {
+        self.start_sign_in(slug, method, SecretInput::Browser, cx);
+    }
+
+    pub fn sign_in_with_cookies(&mut self, slug: &str, cx: &mut Context<Self>) {
+        self.start_sign_in(slug, SignIn::Secret, SecretInput::Manual, cx);
+    }
+
+    fn start_sign_in(
+        &mut self,
+        slug: &str,
+        method: SignIn,
+        secret_input: SecretInput,
+        cx: &mut Context<Self>,
+    ) {
         if self.is_pending() {
             return;
         }
@@ -344,8 +451,12 @@ impl Session {
             while let Some(prompt) = prompt_rx.recv().await {
                 this.update(cx, |this, cx| {
                     if matches!(this.state, SessionState::Authorizing(_)) {
+                        let secret = matches!(prompt, SignInPrompt::Secret);
                         this.state = SessionState::Authorizing(Some(prompt));
                         cx.notify();
+                        if secret && matches!(secret_input, SecretInput::Browser) {
+                            this.open_window(cx);
+                        }
                     }
                 })
                 .ok();
@@ -365,6 +476,7 @@ impl Session {
             this.update(cx, |this, cx| {
                 this.prompt_task = None;
                 this.input = None;
+                this.window = None;
                 match authorized {
                     Ok(session) => this.signed_in(session, index, cx),
                     Err(error) => this.failed(&error, cx),
@@ -385,6 +497,8 @@ impl Session {
         self.task = None;
         self.prompt_task = None;
         self.input = None;
+        self.window = None;
+        self.window_task = None;
         self.awaiting = None;
         self.error = None;
         if let Some((index, profile)) = self.resume.take() {
@@ -398,8 +512,73 @@ impl Session {
         cx.emit(SessionEvent::SignedOut);
     }
 
+    /// Opens the browser window for the secret prompt now showing. The window answers the prompt
+    /// itself once the user is through; closing it cancels the sign-in.
+    fn open_window(&mut self, cx: &mut Context<Self>) {
+        if !matches!(
+            self.state,
+            SessionState::Authorizing(Some(SignInPrompt::Secret))
+        ) || self.window.is_some()
+        {
+            return;
+        }
+        let Some(index) = self.awaiting else {
+            return;
+        };
+        let provider = &self.providers[index];
+        let Some(sign_in) = provider.web_sign_in() else {
+            return;
+        };
+        let target = webview::Target {
+            url: sign_in.url.to_string(),
+            landing: sign_in.landing.to_string(),
+            domain: sign_in.domain.to_string(),
+            proof: sign_in.proof.iter().map(ToString::to_string).collect(),
+            title: t!("login-window-title", provider = provider.name()).to_string(),
+            agent: sign_in.agent.map(str::to_owned),
+        };
+        match webview::Login::open(target) {
+            Ok(login) => self.window = Some(login),
+            Err(error) => {
+                log::warn!("session: cannot open the sign-in window: {error:#}");
+                // Dropping the provider's task closes its prompt channel, which ends the prompt
+                // task on its own; this runs inside that task, so it must not drop it here.
+                self.task = None;
+                self.input = None;
+                return self.failed(&error, cx);
+            }
+        }
+        self.window_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(WINDOW_POLL).await;
+                let open = this.update(cx, |this, cx| {
+                    let Some(login) = this.window.as_mut() else {
+                        return false;
+                    };
+                    match login.poll() {
+                        webview::Poll::Pending => true,
+                        webview::Poll::Closed => {
+                            this.window = None;
+                            this.cancel_sign_in(cx);
+                            false
+                        }
+                        webview::Poll::Cookies(header) => {
+                            this.window = None;
+                            this.submit_input(header, cx);
+                            false
+                        }
+                    }
+                });
+                if !open.unwrap_or(false) {
+                    break;
+                }
+            }
+        }));
+    }
+
     pub fn submit_input(&mut self, text: String, cx: &mut Context<Self>) {
         if let Some(input) = &self.input {
+            self.window = None;
             input.send(text).ok();
             if let SessionState::Authorizing(Some(
                 SignInPrompt::Secret | SignInPrompt::Accounts(_),
@@ -422,6 +601,21 @@ impl Session {
         }
     }
 
+    /// Whether the active provider has an account stored, which is what tells a failed restore
+    /// from a user who signed out.
+    fn stored_active(&self) -> bool {
+        self.active
+            .is_some_and(|index| self.providers[index].stored())
+    }
+
+    /// Tries the stored account again once the network is back, for a run that started without
+    /// one. Anything but a run held up by the network is left alone.
+    pub fn restore_if_offline(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.state, SessionState::Offline(_)) {
+            self.restore(cx);
+        }
+    }
+
     fn remaining(&self) -> Option<usize> {
         self.active
             .filter(|index| self.providers[*index].stored())
@@ -436,13 +630,16 @@ impl Session {
         self.attempt = 0;
         self.prompt_task = None;
         self.input = None;
+        self.window = None;
+        self.window_task = None;
         self.awaiting = None;
         self.resume = None;
         self.client = None;
         self.catalog = None;
         self.playback = None;
+        self.shape = Shape::Saved;
         self.authenticated = false;
-        self.playcounts = false;
+        self.capabilities = Capabilities::NONE;
         self.state = SessionState::SignedOut;
         cx.notify();
         cx.emit(SessionEvent::SignedOut);
@@ -466,8 +663,9 @@ impl Session {
         self.catalog = Some(Arc::new(CatalogSource::new(session.api.clone())));
         self.client = Some(session.api);
         self.playback = Some(session.playback);
+        self.shape = session.shape;
         self.authenticated = session.authenticated;
-        self.playcounts = session.playcounts;
+        self.capabilities = session.capabilities;
         self.state = SessionState::SignedIn(session.profile);
         self.attempt = 0;
         self.start_heartbeat(cx);
@@ -479,8 +677,9 @@ impl Session {
         self.client = None;
         self.catalog = None;
         self.playback = None;
+        self.shape = Shape::Saved;
         self.authenticated = false;
-        self.playcounts = false;
+        self.capabilities = Capabilities::NONE;
         self.watch = None;
         self.reconnect = None;
         self.reconnecting = false;
@@ -550,8 +749,9 @@ impl Session {
         self.catalog = Some(Arc::new(CatalogSource::new(session.api.clone())));
         self.client = Some(session.api);
         self.playback = Some(session.playback);
+        self.shape = session.shape;
         self.authenticated = session.authenticated;
-        self.playcounts = session.playcounts;
+        self.capabilities = session.capabilities;
         log::debug!("session: reconnected");
         cx.notify();
         cx.emit(SessionEvent::Reconnected);
@@ -559,13 +759,23 @@ impl Session {
 
     fn failed(&mut self, error: &Error, cx: &mut Context<Self>) {
         let failure = Failure::new(error);
+        Network::failed(&format!("{error:#}"), cx);
         if let Some(failed) = self.awaiting.or(self.active) {
             self.error = Some((failed, failure.clone()));
         }
+        // Only a restore may end up offline. A sign-in the user is watching says what went
+        // wrong on the page they started it from.
+        let restoring = self.awaiting.is_none();
         self.awaiting = None;
         if let Some((index, profile)) = self.resume.take() {
             self.active = Some(index);
             self.state = SessionState::SignedIn(profile);
+            cx.notify();
+            return;
+        }
+        if restoring && failure.offline() && self.stored_active() {
+            log::warn!("session: the account could not be reached, carrying on offline");
+            self.state = SessionState::Offline(failure);
             cx.notify();
             return;
         }
@@ -578,73 +788,163 @@ impl Session {
     }
 
     fn restore_local(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.local_folder.clone() else {
+        if self.local_folders.is_empty() {
             return;
-        };
-        let provider = self.local_provider.clone();
-        let io = self.io.clone();
-        self.local_task = Some(cx.spawn(async move |this, cx| {
-            let prompt: PromptSink = Arc::new(|_| {});
-            let (_tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-            let restored = join(
-                io.spawn(async move { provider.sign_in(SignIn::Path(path), prompt, rx).await }),
-            )
-            .await;
-            this.update(cx, |this, cx| {
-                if let Ok(session) = restored {
-                    this.local_signed_in(session, cx);
-                }
-            })
-            .ok();
-        }));
+        }
+        self.rescan_local(false, cx);
     }
 
-    pub fn choose_local_folder(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    /// Adds a folder to the local library, then rescans every configured folder together so
+    /// artists and albums that span more than one root merge into one, seamlessly.
+    pub fn add_local_folder(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.add_local_folders(vec![path], cx);
+    }
+
+    /// Same as [`Session::add_local_folder`], for a batch picked in one native dialog.
+    pub fn add_local_folders(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let mut folders = self.local_folders.clone();
+        for path in paths {
+            if folders.iter().any(|existing| overlaps(existing, &path)) {
+                log::warn!(
+                    "session: {} overlaps an already-added local folder",
+                    path.display()
+                );
+                continue;
+            }
+            folders.push(path);
+        }
+        if folders.len() == self.local_folders.len() {
+            return;
+        }
+        self.set_local_folders(folders, cx);
+    }
+
+    pub fn remove_local_folder(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let mut folders = self.local_folders.clone();
+        let before = folders.len();
+        folders.retain(|existing| existing != path);
+        if folders.len() == before {
+            return;
+        }
+        self.set_local_folders(folders, cx);
+    }
+
+    /// Rescans every configured local folder without changing the list, e.g. after files
+    /// changed on disk or a tag was edited. A `thorough` rescan is the one the user asked for:
+    /// it forgets what the last scan recorded, so every folder is listed and every file stat'd
+    /// again, which is the only way an edit made behind Sonora's back is noticed.
+    pub fn rescan_local(&mut self, thorough: bool, cx: &mut Context<Self>) {
+        if thorough {
+            self.local_provider.forget_scan();
+        }
+        self.set_local_folders(self.local_folders.clone(), cx);
+    }
+
+    /// Points the local library at `folders` and scans them. A scan already under way is
+    /// cancelled first: its folders may be the ones just removed, and two scans would only
+    /// fight over the same disk.
+    fn set_local_folders(&mut self, folders: Vec<PathBuf>, cx: &mut Context<Self>) {
+        music::progress::cancel();
+        if folders.is_empty() {
+            self.scanning = false;
+            self.local_provider.sign_out();
+            self.local_folders = Vec::new();
+            self.settings.update(cx, |settings, cx| {
+                settings.set_local_folders(Vec::new(), cx)
+            });
+            self.local_client = None;
+            self.local_catalog = None;
+            self.local_playback = None;
+            self.local_capabilities = Capabilities::NONE;
+            self.local_task = None;
+            cx.notify();
+            cx.emit(SessionEvent::LocalChanged);
+            return;
+        }
+
         let provider = self.local_provider.clone();
-        let chosen = path.clone();
+        let chosen = folders.clone();
         let io = self.io.clone();
+        self.scanning = true;
+        cx.notify();
         self.local_task = Some(cx.spawn(async move |this, cx| {
             let prompt: PromptSink = Arc::new(|_| {});
             let (_tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
             let signed_in = join(
-                io.spawn(async move { provider.sign_in(SignIn::Path(path), prompt, rx).await }),
+                io.spawn(async move { provider.sign_in(SignIn::Path(folders), prompt, rx).await }),
             )
             .await;
 
-            this.update(cx, |this, cx| match signed_in {
-                Ok(session) => {
-                    this.local_folder = Some(chosen.clone());
-                    this.settings.update(cx, |settings, cx| {
-                        settings.set_local_folder(Some(chosen), cx)
-                    });
-                    this.local_signed_in(session, cx);
-                }
-                Err(error) => {
-                    log::warn!("session: cannot set local music folder: {error:#}");
+            this.update(cx, |this, cx| {
+                this.scanning = false;
+                match signed_in {
+                    Ok(session) => {
+                        this.local_folders = chosen.clone();
+                        this.settings
+                            .update(cx, |settings, cx| settings.set_local_folders(chosen, cx));
+                        this.local_signed_in(session, cx);
+                    }
+                    Err(error) => {
+                        log::warn!("session: cannot update local music folders: {error:#}");
+                        cx.notify();
+                    }
                 }
             })
             .ok();
         }));
     }
 
-    pub fn clear_local_folder(&mut self, cx: &mut Context<Self>) {
-        self.local_provider.sign_out();
-        self.local_folder = None;
-        self.settings
-            .update(cx, |settings, cx| settings.set_local_folder(None, cx));
-        self.local_client = None;
-        self.local_catalog = None;
-        self.local_playback = None;
-        self.local_task = None;
-        cx.notify();
-        cx.emit(SessionEvent::LocalChanged);
+    /// Brings up the local engine even when no folder has ever been configured, so a
+    /// file-association open can play a track without the user having visited Settings first.
+    /// A no-op once a local client already exists or one is already being brought up; a
+    /// configured library goes through the normal [`Session::rescan_local`] path instead.
+    pub fn ensure_local_ready(&mut self, cx: &mut Context<Self>) {
+        if self.local_client.is_some() || self.local_task.is_some() {
+            return;
+        }
+        if !self.local_folders.is_empty() {
+            return self.rescan_local(false, cx);
+        }
+
+        let provider = self.local_provider.clone();
+        let io = self.io.clone();
+        self.local_task = Some(cx.spawn(async move |this, cx| {
+            let prompt: PromptSink = Arc::new(|_| {});
+            let (_tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let signed_in = join(io.spawn(async move {
+                provider.sign_in(SignIn::Path(Vec::new()), prompt, rx).await
+            }))
+            .await;
+
+            this.update(cx, |this, cx| match signed_in {
+                Ok(session) => this.local_signed_in(session, cx),
+                Err(error) => {
+                    log::warn!("session: cannot initialize local playback: {error:#}");
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// Whether a local scan is under way right now.
+    pub fn scanning(&self) -> bool {
+        self.scanning
     }
 
     fn local_signed_in(&mut self, session: ProviderSession, cx: &mut Context<Self>) {
         self.local_catalog = Some(Arc::new(CatalogSource::new(session.api.clone())));
         self.local_client = Some(session.api);
         self.local_playback = Some(session.playback);
+        self.local_capabilities = session.capabilities;
         cx.notify();
         cx.emit(SessionEvent::LocalChanged);
     }
+}
+
+/// Whether `a` and `b` are the same directory, or one contains the other — either way, scanning
+/// both would double-count the tracks they share.
+fn overlaps(a: &Path, b: &Path) -> bool {
+    let a = std::fs::canonicalize(a).unwrap_or_else(|_| a.to_path_buf());
+    let b = std::fs::canonicalize(b).unwrap_or_else(|_| b.to_path_buf());
+    a == b || a.starts_with(&b) || b.starts_with(&a)
 }

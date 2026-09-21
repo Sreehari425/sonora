@@ -2,10 +2,10 @@ use gpui::{App, Menu, MenuItem, OsAction};
 use i18n::t;
 use input::{
     CloseWindow, Hide, HideOthers, MinimizeWindow, OpenSettings, Quit, RefreshLibrary, ShowAll,
-    SignOut, SongNext, SongPrevious, TogglePlayback, ZoomWindow,
+    SignOut, SongNext, SongPrevious, TogglePlayback, ToggleRepeat, ToggleShuffle, ZoomWindow,
 };
 use router::Destination;
-use state::Sonora;
+use state::{Shelf, Sonora};
 use ui::{Copy, Cut, Paste, SelectAll};
 
 pub fn register(lingers: bool, cx: &mut App) {
@@ -39,9 +39,13 @@ pub fn register(lingers: bool, cx: &mut App) {
                 let history = Sonora::global(cx).history.clone();
                 history.update(cx, |history, cx| history.refresh(cx));
             }
-            _ => {
+            at => {
+                let shelf = match at {
+                    Destination::Local(_) => Shelf::Local,
+                    _ => Shelf::Streaming,
+                };
                 let library = Sonora::global(cx).library.clone();
-                library.update(cx, |library, cx| library.refresh(cx));
+                library.update(cx, |library, cx| library.refresh(shelf, cx));
             }
         },
     );
@@ -59,6 +63,16 @@ pub fn register(lingers: bool, cx: &mut App) {
     cx.on_action(|_: &SongNext, cx: &mut App| {
         let playback = Sonora::global(cx).playback.clone();
         playback.update(cx, |playback, cx| playback.next(cx));
+    });
+
+    cx.on_action(|_: &ToggleShuffle, cx: &mut App| {
+        let queue = Sonora::global(cx).queue.clone();
+        queue.update(cx, |queue, cx| queue.toggle_shuffle(cx));
+    });
+
+    cx.on_action(|_: &ToggleRepeat, cx: &mut App| {
+        let playback = Sonora::global(cx).playback.clone();
+        playback.update(cx, |playback, cx| playback.toggle_repeat(cx));
     });
 
     cx.set_menus(menus());

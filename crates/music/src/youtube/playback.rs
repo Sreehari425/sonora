@@ -4,21 +4,34 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
+use rodio::Source as _;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use ytmusic::YtMusic;
 
-use crate::audio::{Output, RAMP, SmoothGain, Trimmed, Volume};
+use crate::audio::{Chain, Output, RAMP, SmoothGain, Trimmed, Volume};
 use crate::spectrum::Spectrum;
-use crate::youtube::trim;
+use crate::trim;
 use crate::{PlaybackConfig, PlaybackEvent, PlaybackEvents, PlaybackFactory, Player};
 
 const NORMAL_CAP: f32 = 1.0;
 const POLL: Duration = Duration::from_millis(20);
+/// How long the stream metadata, or a download with nothing known about its size, may take
+/// before the attempt is given up. The stream host has no timeout of its own, so a
+/// connection it dropped halfway would otherwise hold the engine on a silent track forever.
+const PATIENCE: Duration = Duration::from_secs(15);
+/// What every mebibyte of a download adds to `PATIENCE`; a link slower than that is not one
+/// the track would play over anyway.
+const PER_MIB: Duration = Duration::from_secs(4);
+/// The size a download is budgeted at when the stream host announced none.
+const UNSIZED_MIB: u64 = 8;
+/// The attempts a fetch gets before the track is reported unavailable.
+const ATTEMPTS: u32 = 2;
 
 enum Command {
     Load {
         id: String,
         at: Option<Duration>,
+        play: bool,
         seamless: bool,
     },
     Preload {
@@ -67,11 +80,12 @@ struct Engine {
 }
 
 impl Player for Engine {
-    fn load(&self, track_id: &str, seamless: bool) -> Result<()> {
+    fn load(&self, track_id: &str, at: Duration, seamless: bool) -> Result<()> {
         self.commands
             .send(Command::Load {
                 id: track_id.to_string(),
-                at: None,
+                at: (!at.is_zero()).then_some(at),
+                play: true,
                 seamless,
             })
             .context("cannot reach playback engine")
@@ -82,6 +96,7 @@ impl Player for Engine {
             .send(Command::Load {
                 id: track_id.to_string(),
                 at: Some(at),
+                play: false,
                 seamless: false,
             })
             .context("cannot reach playback engine")
@@ -138,6 +153,9 @@ struct Slot {
     length: Option<Duration>,
     envelope: Volume,
     gain: f32,
+    /// Where this slot's decoder was opened. The sink counts from the first sample it was
+    /// handed, so a track placed part way through reports a position short by this much.
+    base: Duration,
 }
 
 impl Slot {
@@ -147,6 +165,11 @@ impl Slot {
 
     fn unmute(&self) {
         self.envelope.set(self.gain);
+    }
+
+    /// Where the sound is: what the sink has played of this slot, from where it opened.
+    fn heard(&self, sink: &rodio::Player) -> Duration {
+        self.base + sink.get_pos()
     }
 }
 
@@ -189,7 +212,12 @@ async fn engine_loop(
     events: UnboundedSender<PlaybackEvent>,
     spectrum: Spectrum,
 ) {
-    let output = match Output::open(Volume::new(config.gain), spectrum) {
+    let chain = Chain {
+        volume: Volume::new(config.gain),
+        equalizer: config.equalizer.clone(),
+        spectrum,
+    };
+    let output = match Output::open(chain) {
         Ok(output) => output,
         Err(error) => {
             log::error!("playback: cannot open audio output: {error:#}");
@@ -223,7 +251,7 @@ async fn engine_loop(
             command = commands.recv() => {
                 let Some(command) = command else { break };
                 match command {
-                    Command::Load { id, at, seamless } => {
+                    Command::Load { id, at, play, seamless } => {
                         if seamless && at.is_none() && current.as_ref().is_some_and(|slot| slot.id == id) {
                             playing = true;
                             autostart = true;
@@ -237,9 +265,12 @@ async fn engine_loop(
                                 }
                             }
                             sink.play();
+                            let at = current
+                                .as_ref()
+                                .map_or(Duration::ZERO, |slot| slot.heard(&sink));
                             events.send(PlaybackEvent::Playing {
                                 id: Some(id),
-                                at: sink.get_pos(),
+                                at,
                             }).ok();
                             continue;
                         }
@@ -276,7 +307,7 @@ async fn engine_loop(
                         current = None;
                         queued = None;
                         playing = false;
-                        autostart = at.is_none();
+                        autostart = play;
                         hold = at;
                         prev_len = 0;
                         let Some(loaded) = cached else { continue };
@@ -305,7 +336,7 @@ async fn engine_loop(
                         }
                         if let Some((_, loaded)) = ahead.as_ref().filter(|(cached, _)| *cached == id) {
                             if segue && current.is_some() && queued.is_none() {
-                                match append(&sink, &id, loaded, &config, false) {
+                                match append(&sink, &id, loaded, &config, false, None) {
                                     Ok(slot) => {
                                         log::debug!("playback: {id} is queued for a gapless segue");
                                         queued = Some(slot);
@@ -339,15 +370,15 @@ async fn engine_loop(
                             playing = true;
                             events.send(PlaybackEvent::Playing {
                                 id: Some(slot.id.clone()),
-                                at: sink.get_pos(),
+                                at: slot.heard(&sink),
                             }).ok();
                         }
                     }
                     Command::Pause => {
                         autostart = false;
                         playing = false;
-                        let position = sink.get_pos();
                         if let Some(slot) = &current {
+                            let position = slot.heard(&sink);
                             slot.mute();
                             await_drain(&sink).await;
                             sink.pause();
@@ -357,21 +388,24 @@ async fn engine_loop(
                             }).ok();
                         }
                     }
-                    Command::Seek(position) => match &current {
-                        None if hold.is_some() => hold = Some(position),
-                        None => {}
+                    Command::Seek(position) => match &mut current {
+                        // Still loading: start there once the track arrives.
+                        None => hold = Some(position),
                         Some(slot) => {
                             slot.mute();
                             await_drain(&sink).await;
-                            if let Err(error) = sink.try_seek(position) {
-                                log::warn!("playback: cannot seek: {error}");
+                            match sink.try_seek(position) {
+                                // The sink counts from the target now, so the offset the
+                                // decoder opened at is spent.
+                                Ok(()) => slot.base = Duration::ZERO,
+                                Err(error) => log::warn!("playback: cannot seek: {error}"),
                             }
                             if playing {
                                 slot.unmute();
                             }
-                            events.send(PlaybackEvent::Position {
+                            events.send(PlaybackEvent::Seeked {
                                 id: Some(slot.id.clone()),
-                                at: sink.get_pos(),
+                                at: slot.heard(&sink),
                             }).ok();
                         }
                     },
@@ -421,7 +455,7 @@ async fn engine_loop(
                         continue;
                     };
                     if segue && current.is_some() && queued.is_none() {
-                        match append(&sink, &id, &loaded, &config, false) {
+                        match append(&sink, &id, &loaded, &config, false, None) {
                             Ok(slot) => {
                                 log::debug!("playback: {id} is queued for a gapless segue");
                                 queued = Some(slot);
@@ -464,7 +498,7 @@ async fn engine_loop(
                             }
                             events.send(PlaybackEvent::Position {
                                 id: Some(slot.id.clone()),
-                                at: sink.get_pos(),
+                                at: slot.heard(&sink),
                             }).ok();
                         }
                         None => log::debug!("playback: track ended with nothing queued ahead"),
@@ -474,7 +508,7 @@ async fn engine_loop(
                     if let Some(slot) = &current {
                         events.send(PlaybackEvent::Position {
                             id: Some(slot.id.clone()),
-                            at: sink.get_pos(),
+                            at: slot.heard(&sink),
                         }).ok();
                     }
                 }
@@ -523,6 +557,12 @@ async fn await_drain(sink: &rodio::Player) {
     tokio::time::sleep(RAMP).await;
 }
 
+/// Puts a track on the sink on its own, opened at `at`, and starts it if asked.
+///
+/// The position goes to the decoder rather than to the sink. Clearing only marks the track
+/// being replaced for skipping, and the callback that skips it is the one that carries out
+/// whatever seek the sink was asked for next, so a seek here would move the old track and leave
+/// the one just appended to play from the beginning.
 fn begin(
     sink: &rodio::Player,
     id: &str,
@@ -534,12 +574,7 @@ fn begin(
     if sink.len() > 0 {
         sink.clear();
     }
-    let slot = append(sink, id, loaded, config, true)?;
-    if let Some(at) = at
-        && let Err(error) = sink.try_seek(at)
-    {
-        log::warn!("playback: cannot start {id} at {}s: {error}", at.as_secs());
-    }
+    let slot = append(sink, id, loaded, config, true, at)?;
     match start {
         true => sink.play(),
         false => sink.pause(),
@@ -547,12 +582,15 @@ fn begin(
     Ok(slot)
 }
 
+/// Puts a track on the end of the sink's queue with its decoder opened at `at`, fading it in
+/// when it replaces a track rather than following one to its end.
 fn append(
     sink: &rodio::Player,
     id: &str,
     loaded: &Loaded,
     config: &PlaybackConfig,
     fade: bool,
+    at: Option<Duration>,
 ) -> Result<Slot> {
     let gain = normalisation(config.normalisation, loaded.loudness_db);
     let envelope = Volume::new(gain);
@@ -570,17 +608,28 @@ fn append(
         ),
         None => log::debug!("playback: {id} carries no edit list"),
     }
-    let source = Trimmed::new(
+    let mut source = Trimmed::new(
         source,
         edit.map(|edit| edit.skip).unwrap_or_default(),
         edit.and_then(|edit| edit.take),
     );
+    let base = match at.filter(|at| !at.is_zero()) {
+        Some(at) => match source.try_seek(at) {
+            Ok(()) => at,
+            Err(error) => {
+                log::warn!("playback: cannot start {id} at {}s: {error}", at.as_secs());
+                Duration::ZERO
+            }
+        },
+        None => Duration::ZERO,
+    };
     sink.append(SmoothGain::new(source, envelope.clone(), initial, RAMP));
     Ok(Slot {
         id: id.to_string(),
         length: loaded.duration,
         envelope,
         gain,
+        base,
     })
 }
 
@@ -618,13 +667,49 @@ fn refusal(id: String, error: &anyhow::Error) -> PlaybackEvent {
     }
 }
 
+/// Loads a track's audio, giving a stalled attempt one more go before failing. Only a
+/// timeout is retried: a refusal from the stream host is as final the second time.
 async fn fetch(api: &YtMusic, id: &str) -> Result<Loaded> {
-    let (format, data) = api.load_audio(id).await?;
+    let mut attempt = 1;
+    loop {
+        match attempt_fetch(api, id).await {
+            Err(error) if attempt < ATTEMPTS && error.is::<tokio::time::error::Elapsed>() => {
+                log::warn!("playback: {id} stalled, trying again: {error:#}");
+                attempt += 1;
+            }
+            result => return result,
+        }
+    }
+}
+
+async fn attempt_fetch(api: &YtMusic, id: &str) -> Result<Loaded> {
+    let started = std::time::Instant::now();
+    let format = tokio::time::timeout(PATIENCE, api.best_audio(id))
+        .await
+        .context("stream metadata timed out")??;
+    let data = tokio::time::timeout(allowance(format.content_length), api.download(&format))
+        .await
+        .context("stream download timed out")??;
+    log::debug!(
+        "playback: {id} loaded, itag {} {} {} kbps, {:.1} MiB in {:?}",
+        format.itag,
+        format.codec,
+        format.bitrate / 1000,
+        data.len() as f64 / (1024.0 * 1024.0),
+        started.elapsed()
+    );
     Ok(Loaded {
         data: Arc::new(data),
         loudness_db: format.loudness_db,
         duration: format.duration,
     })
+}
+
+/// How long a download of `bytes` may take: `PATIENCE` plus `PER_MIB` for every mebibyte.
+/// A size the host did not announce is budgeted as a long track, `UNSIZED_MIB`.
+fn allowance(bytes: Option<u64>) -> Duration {
+    let mib = bytes.map_or(UNSIZED_MIB, |bytes| bytes.div_ceil(1024 * 1024));
+    PATIENCE + PER_MIB * mib as u32
 }
 
 fn decode(data: Arc<Vec<u8>>) -> Result<impl rodio::Source + Send + 'static> {

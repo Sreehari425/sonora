@@ -8,12 +8,11 @@ use librespot_protocol::playlist4_external::SelectedListContent as RootList;
 use protobuf::Message as _;
 
 use crate::spotify::{
-    albums, artists, collection, collection2, lyrics, pathfinder, playlists, profiles, radio,
-    search, wire,
+    albums, artists, collection, collection2, pathfinder, playlists, profiles, radio, search, wire,
 };
 use crate::{
-    Album, AlbumDetail, Artist, ArtistProfile, Genre, GenreDetail, HomeFeed, Lyrics, Playlist,
-    PlaylistDetail, SavedArtist, Track, UserDetail, UserProfile,
+    Album, AlbumDetail, Artist, ArtistCatalogue, ArtistProfile, Genre, GenreDetail, HomeFeed,
+    Playlist, PlaylistDetail, SavedArtist, Track, UserDetail, UserProfile,
 };
 
 const MADE_FOR_YOU: &str = "0JQ5DAt0tbjZptfcdMSKl3";
@@ -29,6 +28,21 @@ impl LibrespotClient {
 
     pub fn session(&self) -> &Session {
         &self.session
+    }
+
+    /// The account's own display name, or `None` when the lookup fails. Signing in calls this,
+    /// so a profile Spotify will not hand over must not take the session down with it.
+    async fn display_name(&self, username: &str) -> Option<String> {
+        let body = self
+            .session
+            .spclient()
+            .get_user_profile(&profiles::escaped(username), None, None)
+            .await
+            .inspect_err(|error| log::debug!("profiles: cannot read {username}: {error}"))
+            .ok()?;
+
+        let profile: wire::Named = serde_json::from_slice(&body).ok()?;
+        profile.label().map(str::to_owned)
     }
 }
 
@@ -50,15 +64,12 @@ impl MusicApi for LibrespotClient {
 
     async fn profile(&self) -> Result<UserProfile> {
         let username = self.session.username();
-        let body = self
-            .session
-            .spclient()
-            .get_user_profile(&username, None, None)
-            .await?;
-
-        let profile: wire::Named = serde_json::from_slice(&body).unwrap_or_default();
+        let display_name = self
+            .display_name(&username)
+            .await
+            .unwrap_or_else(|| username.clone());
         Ok(UserProfile {
-            display_name: profile.label().unwrap_or(&username).to_owned(),
+            display_name,
             id: username,
         })
     }
@@ -71,6 +82,10 @@ impl MusicApi for LibrespotClient {
         artists::artist(&self.session, artist_id).await
     }
 
+    async fn artist_catalogue(&self, artist_id: &str, known: &[Track]) -> Result<ArtistCatalogue> {
+        artists::catalogue(&self.session, artist_id, known.to_vec()).await
+    }
+
     async fn artist_profile(&self, artist_id: &str) -> Result<ArtistProfile> {
         artists::profile(&self.session, artist_id).await
     }
@@ -79,8 +94,8 @@ impl MusicApi for LibrespotClient {
         artists::images(&self.session, &ids).await
     }
 
-    async fn saved_tracks(&self, limit: u32) -> Result<Vec<Track>> {
-        collection::saved_tracks(&self.session, limit).await
+    async fn saved_tracks(&self) -> Result<Vec<Track>> {
+        collection::saved_tracks(&self.session).await
     }
 
     async fn set_track_saved(&self, track_id: &str, saved: bool) -> Result<()> {
@@ -95,20 +110,16 @@ impl MusicApi for LibrespotClient {
         pathfinder::track(&self.session, track_id).await
     }
 
-    async fn track_lyrics(&self, track_id: &str) -> Result<Option<Lyrics>> {
-        lyrics::lyrics(&self.session, track_id).await
-    }
-
-    async fn saved_albums(&self, limit: u32) -> Result<Vec<Album>> {
-        albums::saved_albums(&self.session, limit).await
+    async fn saved_albums(&self) -> Result<Vec<Album>> {
+        albums::saved_albums(&self.session).await
     }
 
     async fn set_album_saved(&self, album_id: &str, saved: bool) -> Result<()> {
         collection2::set_album_saved(&self.session, album_id, saved).await
     }
 
-    async fn saved_artists(&self, limit: u32) -> Result<Vec<SavedArtist>> {
-        artists::saved_artists(&self.session, limit).await
+    async fn saved_artists(&self) -> Result<Vec<SavedArtist>> {
+        artists::saved_artists(&self.session).await
     }
 
     async fn set_artist_saved(&self, artist_id: &str, saved: bool) -> Result<()> {
@@ -144,8 +155,12 @@ impl MusicApi for LibrespotClient {
         playlists::playlist_tracks(&self.session, playlist_id).await
     }
 
-    async fn track_radio(&self, track_id: &str) -> Result<Vec<Track>> {
-        radio::track_radio(&self.session, track_id).await
+    async fn track_radio(
+        &self,
+        track_id: &str,
+        _from: Option<&str>,
+    ) -> Result<(Vec<Track>, Option<String>)> {
+        Ok((radio::track_radio(&self.session, track_id).await?, None))
     }
 
     async fn search(&self, query: &str) -> Result<Vec<Track>> {
@@ -212,16 +227,44 @@ impl MusicApi for LibrespotClient {
         playlists::remove_track(&self.session, playlist_id, track_id).await
     }
 
-    async fn playlists(&self, limit: u32) -> Result<Vec<Playlist>> {
-        let body = self
-            .session
-            .spclient()
-            .get_rootlist(0, Some(limit as usize))
-            .await?;
+    async fn set_library_item_pinned(
+        &self,
+        uri: &str,
+        pinned: bool,
+    ) -> Result<crate::LibraryPinResult> {
+        pathfinder::set_library_item_pinned(&self.session, uri, pinned).await
+    }
 
-        let rootlist =
-            RootList::parse_from_bytes(&body).context("cannot decode the rootlist protobuf")?;
-        let mut playlists = wire::playlists_from(&rootlist);
+    async fn library_items(
+        &self,
+        order: crate::LibraryOrder,
+    ) -> Result<Option<Vec<crate::LibraryItem>>> {
+        pathfinder::library(&self.session, order).await.map(Some)
+    }
+
+    async fn playlists(&self) -> Result<Vec<Playlist>> {
+        let mut playlists = Vec::new();
+        let mut offset = 0;
+        let mut seen = HashSet::new();
+        loop {
+            let body = self
+                .session
+                .spclient()
+                .get_rootlist(offset, Some(300))
+                .await?;
+            let rootlist =
+                RootList::parse_from_bytes(&body).context("cannot decode the rootlist protobuf")?;
+            let count = rootlist.contents.items.len();
+            playlists.extend(
+                wire::playlists_from(&rootlist)
+                    .into_iter()
+                    .filter(|playlist| seen.insert(playlist.id.clone())),
+            );
+            offset += count;
+            if count == 0 || !rootlist.contents.truncated() {
+                break;
+            }
+        }
 
         let owners = playlists
             .iter()

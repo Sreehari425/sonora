@@ -1,22 +1,20 @@
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Div, ElementId, Entity, EntityId, FontWeight, MouseDownEvent, Pixels,
-    Point, ScrollHandle, ScrollWheelEvent, SharedString, WeakEntity, Window, div, point, px,
+    AnyElement, App, Context, Div, ElementId, Entity, EntityId, MouseDownEvent, Pixels, Point,
+    ScrollHandle, ScrollWheelEvent, SharedString, WeakEntity, Window, div, point, px,
 };
-use std::cell::Cell;
 use std::rc::Rc;
 
-use music::{Album, GenreItem, GenreSection, Playlist};
-use router::{Destination, navigate};
+use music::{GenreItem, GenreSection};
 use state::Playback;
 use ui::{
-    ActiveTheme as _, Button, Card, Deck, Glide, Mode, Popup, Skeleton, Text, Viewport, heading,
+    ActiveTheme as _, Button, Card, Deck, Glide, Mode, Popup, Scrollbar, Skeleton, Text, heading,
     snapped,
 };
 
 use crate::shared::album_grid::CardGrid;
 use crate::shared::cards;
-use crate::shared::menus::Item;
+use crate::shared::menus::{Item, ItemMenu};
 
 const PLATE: Pixels = px(260.);
 const LANES: usize = 5;
@@ -37,18 +35,26 @@ pub(crate) struct Shelves {
     host: EntityId,
     playback: Entity<Playback>,
     rails: Vec<Rail>,
-    above: Rc<Cell<Option<Pixels>>>,
+    /// The submenu state of a track's context menu.
+    menus: ItemMenu,
     context_menu: Option<(Item, Point<Pixels>)>,
 }
 
 impl Shelves {
-    pub(crate) fn new(id: &'static str, host: EntityId, playback: Entity<Playback>) -> Self {
+    pub(crate) fn new(
+        id: &'static str,
+        host: EntityId,
+        playback: Entity<Playback>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let playlist_scrollbar = cx.new(|_| Scrollbar::inset().watching(host));
+
         Self {
             id,
             host,
             playback,
             rails: Vec::new(),
-            above: Rc::new(Cell::new(None)),
+            menus: ItemMenu::new(playlist_scrollbar),
             context_menu: None,
         }
     }
@@ -91,15 +97,12 @@ impl Shelves {
 
     fn popup(&self, cx: &mut Context<Self>) -> Option<Popup> {
         let (item, at) = self.context_menu.clone()?;
+        let menu = item.menu(&self.menus, self.playback.clone(), false, cx);
 
-        Some(
-            Popup::new(at, item.menu(self.playback.clone(), false, cx)).on_close(cx.listener(
-                |this, _, _, cx| {
-                    this.context_menu = None;
-                    cx.notify();
-                },
-            )),
-        )
+        Some(Popup::new(at, menu).on_close(cx.listener(|this, _, _, cx| {
+            this.context_menu = None;
+            cx.notify();
+        })))
     }
 
     pub(crate) fn render(
@@ -107,7 +110,6 @@ impl Shelves {
         sections: Rc<Vec<GenreSection>>,
         mode: Mode,
         width: Pixels,
-        viewport: Viewport,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -125,13 +127,10 @@ impl Shelves {
             .map(|section| self.height(section, mode, width, window, cx))
             .collect();
         let me = cx.entity().downgrade();
-        let above = self.above.clone();
 
         let stack = Deck::new(self.tag("stack", 0))
-            .viewport(viewport)
             .rows(heights)
             .gap(STACK_GAP)
-            .on_measure(move |top, _, _| above.set(Some(top)))
             .draw(move |place, window, cx| {
                 let Some(view) = me.upgrade() else {
                     return div().into_any_element();
@@ -154,17 +153,6 @@ impl Shelves {
             .child(stack)
             .children(self.popup(cx))
             .into_any_element()
-    }
-
-    pub(crate) fn viewport(&self, scroll: &ScrollHandle, window: &Window) -> Viewport {
-        let seen = scroll.bounds().size.height;
-
-        let top = match self.above.get() {
-            Some(above) => scroll.bounds().origin.y - above,
-            None => Pixels::ZERO,
-        };
-
-        Viewport::measured(top, seen, window)
     }
 
     fn height(
@@ -238,14 +226,6 @@ impl Shelves {
         let layout = CardGrid::layout(width);
         let (handle, glide) = self.rails[place].clone();
         let crowded = section.items.len() > layout.columns;
-        let seen = match handle.bounds().size.width {
-            reach if reach > Pixels::ZERO => reach,
-            _ => width,
-        };
-        let viewport = Viewport {
-            top: -handle.offset().x.min(Pixels::ZERO),
-            height: seen,
-        };
         let feed = sections.clone();
         let drawn = me.clone();
         let card = layout.card;
@@ -288,7 +268,6 @@ impl Shelves {
                     .child(
                         Deck::new(self.tag("rail", place))
                             .across()
-                            .viewport(viewport)
                             .rows(section.items.iter().map(|_| card))
                             .gap(RAIL_GAP)
                             .draw(move |index, _, cx| {
@@ -378,38 +357,9 @@ impl Shelves {
         me: &WeakEntity<Self>,
         cx: &App,
     ) -> AnyElement {
-        match item {
-            GenreItem::Playlist(playlist) => self.playlist_card(id, playlist, tile, me, cx),
-            GenreItem::Album(album) => self.album_card(id, album, tile, me, cx),
-            GenreItem::Genre(genre) => plate(slot("genre", id), genre, tile, cx),
-        }
-    }
-
-    fn playlist_card(
-        &self,
-        id: usize,
-        playlist: &Playlist,
-        tile: Option<Pixels>,
-        me: &WeakEntity<Self>,
-        cx: &App,
-    ) -> AnyElement {
-        cards::playlist_card(slot("playlist", id), playlist, &self.playback, cx)
+        cards::item_card(slot("item", id), item, &self.playback, cx)
             .map(|card| dressed(card, tile, cx))
-            .menu(opener(me, Item::Playlist(playlist.clone())))
-            .into_any_element()
-    }
-
-    fn album_card(
-        &self,
-        id: usize,
-        album: &Album,
-        tile: Option<Pixels>,
-        me: &WeakEntity<Self>,
-        cx: &App,
-    ) -> AnyElement {
-        cards::album_card(slot("album", id), album, &self.playback, cx)
-            .map(|card| dressed(card, tile, cx))
-            .menu(opener(me, Item::Album(album.clone())))
+            .when_some(Item::of(item), |card, item| card.menu(opener(me, item)))
             .into_any_element()
     }
 }
@@ -423,6 +373,7 @@ fn opener(
     move |event: &MouseDownEvent, _: &mut Window, cx: &mut App| {
         let at = event.position;
         me.update(cx, |this, cx| {
+            this.menus.reset(cx);
             this.context_menu = Some((item.clone(), at));
             cx.notify();
         })
@@ -436,14 +387,8 @@ pub(crate) fn plate(
     tile: Option<Pixels>,
     cx: &App,
 ) -> AnyElement {
-    let opened = SharedString::from(genre.id.clone());
-
-    Card::new(id, SharedString::from(genre.name.clone()))
-        .cover(genre.cover.clone())
-        .fallback("icons/music.svg")
-        .weight(FontWeight::SEMIBOLD)
+    cards::genre_card(id, genre)
         .map(|card| dressed(card, tile, cx))
-        .press(move |_, _, cx| navigate(Destination::Genre(opened.clone()), cx))
         .into_any_element()
 }
 
@@ -451,7 +396,6 @@ pub(crate) fn grid(
     id: &'static str,
     genres: Rc<Vec<music::Genre>>,
     width: Pixels,
-    viewport: Viewport,
     window: &Window,
     cx: &App,
 ) -> AnyElement {
@@ -460,7 +404,6 @@ pub(crate) fn grid(
     let rows = genres.len().div_ceil(lanes);
 
     Deck::new(id)
-        .viewport(viewport)
         .rows((0..rows).map(|_| row))
         .gap(LANE_GAP)
         .draw(move |place, _, cx| {

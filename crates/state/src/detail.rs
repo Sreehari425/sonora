@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use gpui::{Context, Entity, Task};
-use i18n::t;
 use music::{Album, AlbumDetail, ArtistRef, Contributor, Playlist, PlaylistDetail, Track};
 use tokio::task::AbortHandle;
 
@@ -25,7 +24,10 @@ pub struct Header {
     pub artist_refs: Vec<ArtistRef>,
     pub owner: Option<Contributor>,
     pub release_date: Option<String>,
-    pub meta: Vec<String>,
+    /// The owner's name when the provider gives no id to link it to.
+    pub owner_name: Option<String>,
+    /// Zero when the provider does not report a count.
+    pub track_count: u32,
     pub cover: Option<String>,
 }
 
@@ -36,7 +38,9 @@ pub struct Detail {
     album: Option<Album>,
     playlist: Option<Playlist>,
     tracks: Vec<Track>,
+    continuation: Option<String>,
     loading: bool,
+    loading_more: bool,
     loaded: bool,
     error: Option<String>,
     session: Entity<Session>,
@@ -102,6 +106,14 @@ impl Detail {
                     .retain(|shown| shown.id.as_deref() != Some(track.as_str()));
                 cx.notify();
             }
+            LibraryEvent::TracksHidden(ids) => {
+                let before = this.tracks.len();
+                this.tracks
+                    .retain(|track| !track.id.as_ref().is_some_and(|id| ids.contains(id)));
+                if this.tracks.len() != before {
+                    cx.notify();
+                }
+            }
             _ => {}
         })
         .detach();
@@ -132,7 +144,9 @@ impl Detail {
             album: None,
             playlist: None,
             tracks: Vec::new(),
+            continuation: None,
             loading: false,
+            loading_more: false,
             loaded: false,
             error: None,
             session,
@@ -168,6 +182,59 @@ impl Detail {
         self.loading
     }
 
+    /// Appends provider pages in sequence while keeping the first page immediately usable.
+    fn load_more(&mut self, cx: &mut Context<Self>) {
+        if self.loading_more {
+            return;
+        }
+        let Some(continuation) = self.continuation.clone() else {
+            return;
+        };
+        let Some(id) = self.id.as_deref() else {
+            return;
+        };
+        let Some(catalog) = self.session.read(cx).catalog(id) else {
+            return;
+        };
+
+        self.loading_more = true;
+        cx.notify();
+
+        let request = self
+            .io
+            .spawn(async move { catalog.playlist_continuation(&continuation).await });
+        self.request = Some(request.abort_handle());
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let loaded = join(request).await;
+            this.update(cx, |this, cx| {
+                this.loading_more = false;
+                this.request = None;
+                match loaded {
+                    Ok((tracks, continuation)) => {
+                        let offset = this.tracks.len() as u32;
+                        this.tracks.extend(tracks.into_iter().enumerate().map(
+                            |(index, mut track)| {
+                                track.track_number = offset + index as u32 + 1;
+                                track
+                            },
+                        ));
+                        this.continuation = continuation;
+                        if let Some(playlist) = this.playlist.as_mut()
+                            && playlist.track_count < this.tracks.len() as u32
+                        {
+                            playlist.track_count = this.tracks.len() as u32;
+                            this.header = Some(playlist_header(playlist));
+                        }
+                        this.load_more(cx);
+                    }
+                    Err(error) => log::warn!("detail: cannot load more playlist tracks: {error:#}"),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
     pub fn remove_from_playlist(&mut self, track_id: String, cx: &mut Context<Self>) {
         self.remove_tracks_from_playlist(vec![track_id], cx);
     }
@@ -186,12 +253,20 @@ impl Detail {
         self.error.as_deref()
     }
 
+    /// Loads what the page already shows again, which is how a screen retries after a failure.
+    pub fn reload(&mut self, cx: &mut Context<Self>) {
+        let (Some(kind), Some(id)) = (self.kind, self.id.clone()) else {
+            return;
+        };
+        match kind {
+            Collection::Album => self.open_album(&id, cx),
+            Collection::Playlist => self.open_playlist(&id, cx),
+        }
+    }
+
     pub fn open_album(&mut self, id: &str, cx: &mut Context<Self>) {
         let library = self.library.read(cx);
-        let known = library
-            .album(id)
-            .or_else(|| library.local_album(id))
-            .cloned();
+        let known = library.album(id).cloned();
         let header = known.as_ref().map(album_header);
         if self.open(Collection::Album, id, header, cx) && !self.loaded {
             self.album = known;
@@ -279,9 +354,9 @@ impl Detail {
             this.update(cx, |this, cx| {
                 this.loading = false;
                 this.request = None;
-                match loaded {
+                match crate::settled(loaded, cx) {
                     Ok(detail) => this.adopt(detail, cx),
-                    Err(error) => this.error = Some(format!("{error:#}")),
+                    Err(reason) => this.error = Some(reason),
                 }
                 cx.notify();
             })
@@ -337,7 +412,18 @@ impl Detail {
             Loaded::Album(detail) => {
                 self.header = Some(album_header(&detail.album));
                 self.album = Some(detail.album.clone());
-                self.tracks = detail.tracks.clone();
+                self.tracks = detail
+                    .tracks
+                    .iter()
+                    .filter(|track| {
+                        !track
+                            .id
+                            .as_deref()
+                            .is_some_and(|id| self.library.read(cx).local_track_hidden(id))
+                    })
+                    .cloned()
+                    .collect();
+                self.continuation = None;
             }
             Loaded::Playlist(detail) => {
                 let mut playlist = detail.playlist.clone();
@@ -350,9 +436,11 @@ impl Detail {
                 self.header = Some(playlist_header(&playlist));
                 self.playlist = Some(playlist);
                 self.tracks = detail.tracks.clone();
+                self.continuation = detail.continuation.clone();
             }
         }
         self.loaded = true;
+        self.load_more(cx);
     }
 
     fn clear(&mut self) {
@@ -367,18 +455,15 @@ impl Detail {
         self.album = None;
         self.playlist = None;
         self.tracks.clear();
+        self.continuation = None;
         self.loading = false;
+        self.loading_more = false;
         self.loaded = false;
         self.error = None;
     }
 }
 
 fn album_header(album: &Album) -> Header {
-    let mut parts = Vec::new();
-    if album.track_count > 0 {
-        parts.push(t!("count-songs", count = album.track_count).to_string());
-    }
-
     Header {
         kind: Collection::Album,
         title: album.name.clone(),
@@ -389,7 +474,8 @@ fn album_header(album: &Album) -> Header {
             true => (album.year > 0).then(|| album.year.to_string()),
             false => Some(album.release_date.clone()),
         },
-        meta: parts,
+        owner_name: None,
+        track_count: album.track_count,
         cover: album.cover_large.clone(),
     }
 }
@@ -403,13 +489,10 @@ fn playlist_header(playlist: &Playlist) -> Header {
             avatar: None,
         }),
     };
-    let mut parts = match owner.is_some() {
-        true => Vec::new(),
-        false => vec![playlist.owner.clone()],
+    let owner_name = match owner.is_some() {
+        true => None,
+        false => Some(playlist.owner.clone()),
     };
-    if playlist.track_count > 0 {
-        parts.push(t!("count-songs", count = playlist.track_count).to_string());
-    }
 
     Header {
         kind: Collection::Playlist,
@@ -418,7 +501,8 @@ fn playlist_header(playlist: &Playlist) -> Header {
         artist_refs: Vec::new(),
         owner,
         release_date: None,
-        meta: parts,
+        owner_name,
+        track_count: playlist.track_count,
         cover: playlist.cover.clone(),
     }
 }

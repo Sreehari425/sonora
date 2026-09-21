@@ -22,10 +22,14 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::spotify::playback::Factory;
-use crate::{MusicApi as _, MusicProvider, ProviderSession, SignInFailure, SignInProblem};
+use crate::{
+    Capabilities, MusicApi as _, MusicProvider, ProviderSession, Shape, SignInFailure,
+    SignInProblem,
+};
 
 pub use auth::AuthConfig;
 pub use client::LibrespotClient;
+pub use lyrics::SpotifyLyrics;
 
 pub struct SpotifyProvider {
     config: AuthConfig,
@@ -57,8 +61,12 @@ impl SpotifyProvider {
             profile,
             api: Arc::new(client),
             playback,
+            shape: Shape::Saved,
             authenticated: true,
-            playcounts: true,
+            capabilities: Capabilities {
+                pins: true,
+                ..Capabilities::ALL
+            },
         })
     }
 }
@@ -71,6 +79,14 @@ impl MusicProvider for SpotifyProvider {
 
     fn slug(&self) -> &'static str {
         "spotify"
+    }
+
+    fn reach(&self) -> Option<String> {
+        Some("apresolve.spotify.com".to_owned())
+    }
+
+    fn public_art(&self) -> bool {
+        true
     }
 
     fn sign_in_options(&self) -> Vec<crate::SignIn> {

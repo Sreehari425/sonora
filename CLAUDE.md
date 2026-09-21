@@ -34,6 +34,8 @@ crates/
   i18n/       Fluent localization: the `t!` macro, locale selection, embedded .ftl
   icons/      the icon packs: registry, active pack, path resolution, AssetSource
   embed/      build-script helper that walks a folder and writes include_bytes! literals
+  webview/    a native browser window with a throwaway session, for cookie sign-ins
+  widevine/   fetching the CDM from Google, the pssh box and CENC fMP4 parsing, for any DRM'd provider
 ```
 
 Dependency direction is strict; do not create a back edge:
@@ -41,6 +43,8 @@ Dependency direction is strict; do not create a back edge:
 ```
 sonora → views → state → music
          state, music → storage
+         state → webview
+         music → widevine
          all ui-side crates → ui, router, input → ui → gpui
          every ui-side crate → i18n, icons → gpui
 ```
@@ -49,8 +53,52 @@ sonora → views → state → music
   and the models in its root; each provider lives in a submodule (`music::spotify`,
   `music::youtube`, `music::local`). `state` and `views` see only the root traits and models — never
   a provider module. Only `sonora/src/main.rs` names a concrete provider.
-- `ui` depends only on `gpui`, `serde` and `i18n`. It must never know about `music`, `state`, or
-  playback.
+- **A provider whose tracks are a file to decode writes neither an engine nor a download buffer.**
+  `music::engine` is the one playback engine: two threads, the command queue, the preload, the
+  gapless join, where a position is reported from. A provider implements `engine::Fetch` (how to
+  get a track, how to open a decoder over it) in about a hundred lines and calls `engine::start`.
+  `music::stream` is the one progressive download: a provider implements `stream::Body` for what
+  happens to the bytes, which is nothing at all for Subsonic, a Blowfish stripe for Deezer and a
+  CENC index for Apple Music. Subsonic, Deezer and Apple each had their own copy of both, 85% the
+  same code; do not start a fourth.
+- `widevine` is a leaf that knows nothing about music: the process-wide CDM behind one lock, the
+  `pssh` box, the fetch from Google, and enough ISO-BMFF to find every encrypted sample and
+  fragment. Its `cdm` feature compiles the C++ host in `crates/widevine/shim/` with `cc`: one
+  `shim.cc` that implements `cdm::Host_11` against the vendored Chromium header and loads the
+  module through `dlopen` on Linux and macOS and `LoadLibraryExW` on Windows, with
+  `src/shim.rs` as the Rust side. `music/widevine` forwards to it and `sonora` turns it on for
+  every platform, so a C++ compiler is a build requirement everywhere: `g++` or `clang++`,
+  `cl.exe` on Windows. `widevine::licensing()` has to be held from
+  challenge to license: the CDM cannot have two exchanges open, and preloading the next track is
+  exactly that.
+- **The CDM is never ours to ship, and it arrives the way Kodi's does.** Google licenses it to
+  browser and device vendors and publishes nothing redistributable, so no release artefact,
+  package or Flatpak may carry one and `about.toml` never gains an entry for it.
+  `widevine::find` reads `SONORA_WIDEVINE_CDM` first, so a package with a module of its own can
+  say where it is, then a browser's copy, then the newest version in Sonora's own store,
+  `$XDG_CACHE_HOME/sonora/widevine/<version>/`. The browser search lists no folder at all: it
+  builds exact paths and stats them, since a process walking folders for libraries is what an
+  antivirus flags. A Chromium-family browser records the folder it settled on in its own
+  `WidevineCdm/latest-component-updated-widevine-cdm`, which is also the only way to reach a
+  browser installed where no fixed path predicts, a Nix store entry above all; a Firefox names
+  its profiles in `profiles.ini` and its version in that profile's `prefs.js`; a macOS bundle
+  is reached through the framework's `Libraries` symlink, so the version never has to be known.
+  The one folder Sonora reads is its own store. The search itself waits until the current
+  provider is one whose `protected()` is true and has an account, so a Spotify or YouTube run
+  never looks, and the Settings row (`Drm::shown`) appears only then too. With nothing found,
+  `state::Drm` asks the user: first whether to download, then, with the archive fetched from
+  Google's component update service and its sha256 checked, whether Google's terms out of that
+  archive are accepted. `widevine::offer` is the download, `Offer::install` the install, and
+  `views::shared::widevine` draws the two questions. `SONORA_WIDEVINE_SKIP_BROWSERS` skips the
+  browser search, for trying that download on a machine whose browser already has a copy. A
+  module accepted that way is refreshed
+  through `widevine::fetch` without asking again, and `widevine::uninstall` removes the store
+  from Settings; a CDM already open stays open until the process ends. Only a successful search is remembered, so a
+  module installed mid-run is picked up without a restart. `music::drm` is the only door
+  `state` and `views` use, so neither ever names a provider to ask about protected playback.
+- `ui` depends only on `gpui`, `serde` and `i18n`, plus the per-platform crates `ui::motion` needs
+  to read the system reduce-motion preference (`objc2-app-kit`, `windows-sys`, `ashpd`). It must
+  never know about `music`, `state`, or playback.
 - `music` must never depend on `gpui`. It is plain async Rust.
 - `storage` is a leaf shared by `state` and `music`; it owns the only state database path, schema,
   connection setup and legacy database migration.
@@ -62,6 +110,23 @@ sonora → views → state → music
   `ui`, so `ui` and `views` can both reach it.
 - `embed` is a build-support crate. Nothing links it at runtime; it is a `[build-dependencies]`
   entry of `icons` and `sonora` only.
+- `webview` is a leaf that knows nothing about gpui or music: `Login::open(Target)` puts up a
+  platform window over a throwaway session and `poll()` answers `Pending`, `Closed` or
+  `Cookies(header)`. The user is through as soon as the proof cookies are on the provider's
+  domain; a page of that domain without them means the account provider skipped the hand-off hop
+  behind an interstitial of its own, and `poll` loads the sign-in url once more, which is what the
+  page's own Sign in button would do. Every backend fits the same six calls. `macos.rs` is AppKit and WebKit
+  through `objc2`, `windows.rs` a Win32 host around an InPrivate WebView2, `linux.rs` a GTK window
+  around WebKitGTK, and `unsupported.rs` is what any other platform gets. `native.rs` holds what
+  the three share — the window's size, the source-url-to-host parsing, and the `Fetch`/`Reading`
+  cookie round trip every backend drives the same way — so a new backend writes only the calls
+  that are actually its own. Nothing links webkit2gtk: `linux.rs` reaches it through `dlopen`, one
+  handle whose dependencies also answer for gtk, glib and soup, so a system without it just
+  answers `supported() == false` and the Flatpak runtime, which ships no webkitgtk, keeps
+  building as it is. Each toolkit pins its window
+  to one thread: AppKit and WebView2 to GPUI's main thread, which is why `state::Session` opens
+  and polls from the foreground executor, and GTK to a resident thread of the backend's own, since
+  GPUI talks to X11 or Wayland itself and never initialises GTK.
 
 ## Building
 
@@ -69,7 +134,13 @@ sonora → views → state → music
 
 The GPUI renderer is Vulkan-based, so a Vulkan ICD is a **runtime** requirement, not just a build
 one. Link-time deps: `vulkan-loader`, `wayland`, `libxkbcommon`, `libxcb`, `libx11`, `libxcursor`,
-`libxi`, `fontconfig`, `freetype`, `alsa-lib`, `dbus`, `sqlite`, plus `pkg-config`.
+`libxi`, `fontconfig`, `freetype`, `alsa-lib`, `dbus`, `sqlite`, plus `pkg-config`. A C++
+compiler too: `crates/widevine` compiles its CDM host from `shim.cc` on every platform, through
+`g++` or `clang++` on Linux and macOS and `cl.exe` on Windows.
+
+webkit2gtk is deliberately **not** on that list: `crates/webview` reaches
+`libwebkit2gtk-4.1.so.0` (or the older `4.0.so.37`) through `dlopen` when a provider signs in with
+cookies, so a Linux system without it loses that one window and nothing else.
 
 `.cargo/config.toml` passes `-fuse-ld=mold` for `x86_64-unknown-linux-gnu`, so **mold must be on
 PATH** for that target. If it isn't, either install mold or build with
@@ -145,8 +216,9 @@ option: its requirements forbid AI-assisted code.
 ### macOS / Windows
 
 Released, but not developed against here. `.github/workflows/release.yml` builds both Apple targets
-and `x86_64-pc-windows-msvc`; the `x11`/`wayland` features on `gpui_platform` are inert off Linux,
-so the pin does no harm. There is no local toolchain for either — the release workflow is the only
+and both Windows ones, `x86_64-pc-windows-msvc` on `windows-latest` and `aarch64-pc-windows-msvc`
+on `windows-11-arm`; the `x11`/`wayland` features on `gpui_platform` are inert off Linux, so the pin
+does no harm. There is no local toolchain for either — the release workflow is the only
 thing that exercises them, and it only runs on a tag. The flake declares `x86_64-linux`/`aarch64-linux`
 only, and the mold linker flag targets Linux.
 
@@ -159,6 +231,10 @@ signing and the bundle has no nested code.
 Windows embeds `assets/windows/sonora.ico` through `crates/sonora/build.rs` and `winresource`. It is
 also the one target that compiles SQLite instead of linking the system one: `crates/sonora/Cargo.toml`
 turns on `state/bundled-sqlite` under `cfg(windows)`, because MSVC has no `libsqlite3` to find.
+Each Windows build gets its own Inno Setup installer from `scripts/windows/sonora.iss`, which reads
+the architecture and the output name from `SONORA_ARCH` and `SONORA_SETUP`: `Sonora-Setup.exe` for
+x64 and `Sonora-Setup-arm64.exe` for ARM. `state::updates` picks the installer for its own
+`target_arch`, so renaming either means changing both.
 
 ### Checks
 
@@ -206,21 +282,20 @@ construction, layout and scene assembly, never GPU fill.
 | App state         | `$XDG_DATA_HOME/sonora/state.sqlite` (window/layout/playback state, pins, history, local playlists, usage flags)                  |
 | Credentials cache | `$XDG_CACHE_HOME/sonora/<provider>/credentials.json`, one per provider slug (`spotify`, `youtube`), owner-only mode                |
 | Local cover cache | `$XDG_CACHE_HOME/sonora/local-covers/`                                                                                             |
+| Library snapshots | `$XDG_CACHE_HOME/sonora/cache.sqlite` (what each shelf showed last, to draw before the provider answers)                          |
 | OAuth redirect    | `http://127.0.0.1:8989/login`, override with `SONORA_REDIRECT_URI`                                                                |
+| Scrobble callback | `http://127.0.0.1:8990/scrobble` (Last.fm and Libre.fm)                                                                           |
 | Instance socket   | `sonora.sock`, `sonora-dev.sock` in debug builds, so `cargo run` starts beside an installed Sonora rather than handing over to it |
-| Log file          | `$XDG_STATE_HOME/sonora/sonora.log`, rotated to `.1` past 8 MiB                                                                   |
+| Log file          | `$XDG_STATE_HOME/sonora/sonora.log`, rotated to `.1` past 16 MiB                                                                  |
 | Console logging   | `RUST_LOG`; default filter `warn,symphonia=error,lofty=error`                                                                     |
 | File logging      | `SONORA_LOG`; default adds `sonora=debug,ui=debug`                                                                                |
 
-Startup runs one migration pass before constructing app state. It moves volatile values out of a
-pre-v2 `settings.json`, imports `history.sqlite3`, `flags.sqlite3` and
-`local-playlists.sqlite3` into `state.sqlite`, and moves `local-music.json`'s folder into
-`settings.json`. `music::credentials::migrate` runs in the same pass: it rewrites the Spotify
-`credentials.json` from the cache root into `spotify/` and folds the YouTube `cookies.txt`,
-`authuser.txt` and `guest` files into `youtube/credentials.json`, each owner-only, so the providers
-only ever read the new paths. A legacy file is removed only after its replacement has been written
-successfully.
-This compatibility code is intentionally temporary and can be removed after the next release.
+Nothing is migrated at startup. Every store is read in the shape it has now, so a file an older
+layout left behind is ignored rather than adopted: `history.sqlite3`, `flags.sqlite3` and
+`local-playlists.sqlite3` stay where they lie, and a provider reads only
+`<slug>/credentials.json`. `settings.json` keeps the keys it still names and takes the defaults
+for the rest, and a name in `lyrics_providers` that matches no provider is skipped wherever the
+list is read.
 
 ## Before you build a component
 
@@ -447,9 +522,12 @@ Rules:
   panel's size is ever a function of the other's.
 - **Hiding is a different question from sizing, and it does look at both panels.** `SidebarLeft`
   auto-hides once the room left for content — viewport minus its own width _and_
-  `Chrome::sidebar_right` — drops below `Room::Wide`, so opening the queue pushes it out of the way
-  without resizing it. It reads last frame's publish, which cannot loop: the decision changes
-  visibility, never width. `SidebarRight` decides its own takeover from the viewport alone.
+  the right sidebar's width — drops below `Room::Wide`, so opening the queue pushes it out of the way
+  without resizing it. `Workspace` hands `SidebarLeft::adapt` this frame's right width before it
+  lays anything out, and a flip calls `cx.refresh_windows()`, which lands once the draw is over. A
+  `cx.notify()` raised inside a render schedules nothing in GPUI, so anything less waits for
+  whatever redraw comes along. It cannot loop: the decision changes visibility, never width, and
+  the refresh fires only on a flip. `SidebarRight` decides its own takeover from the viewport alone.
   Toggling a hidden `SidebarLeft` back on while the window is that narrow overlays it at the width
   the user last chose, so its drag ceiling then comes from the viewport alone — an overlay takes no
   content space, so capping it against content room would only disable resizing.
@@ -561,10 +639,12 @@ Working notes:
 
 ### Audio
 
-`music::spotify::playback` owns `librespot_playback::Player` plus `BlazingSink` (`sink.rs`), a
-custom rodio sink with smooth gain ramping and flush-on-seek. `Factory` implements
+`music::spotify::playback` owns `librespot_playback::Player` plus `OutputSink` (`sink.rs`), a
+rodio sink that paces the decoder and drops what a seek or a new track made stale. librespot
+announces `Playing` and `Seeked` before it has written a byte, so `Events` holds those two until
+the sink writes the first packet of the new audio. `Factory` implements
 `music::PlaybackFactory`; `Engine` implements `music::Player`; events arrive as
-`music::PlaybackEvent` (`Loading/Playing/Paused/Position/Ended/Unavailable`).
+`music::PlaybackEvent` (`Loading/Playing/Paused/Position/Seeked/Length/Ended/Unavailable`).
 
 Never drive a player from a view. Go through `state::Playback`, which owns the engine, pumps
 events into `PlaybackState`, and handles shuffle, repeat, skip debouncing, and the cooldown after
@@ -578,9 +658,10 @@ an `Unavailable` track.
 | Entity                                     | Responsibility                                                                                                                                                             |
 | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `Session`                                  | auth lifecycle; emits `SessionEvent::{SignedIn, SignedOut}`; hands out `Arc<dyn MusicApi>` and `Arc<dyn PlaybackFactory>`                                                  |
-| `Library`                                  | saved tracks / playlists / albums / followed artists; `LibraryState` is `Empty \| Loading \| Ready{..,problems} \| Failed` — partial failure is normal, surface `problems` |
+| `Library`                                  | one shelf per live provider; `LibraryState` is `Empty \| Loading \| Ready(Ready) \| Failed` — partial failure is normal, surface `Ready::problems`                        |
 | `Playback`                                 | engine ownership, transport, shuffle/repeat, volume, `Origin` tracking, `toggle_origin`                                                                                    |
 | `Queue`                                    | past / current / upcoming; `start`, `next`, `next_random`, `previous`, `rewind`                                                                                            |
+| `Scrobbling`                               | one row per `music::scrobble::Service`; follows `Playback` and fans each listen out, accounts live in `settings.json` under `scrobbling`                                   |
 | `Home`, `Detail`, `ArtistDetail`, `Search` | per-screen loaders, each owning its `Task`                                                                                                                                 |
 | `AppSettings`                              | debounced durable settings in JSON and runtime state in SQLite                                                                                                             |
 
@@ -599,24 +680,98 @@ library tab); it maps to a `Destination` through `Screen::destination` and is st
 `settings.json` as `startup`. `sonora/src/main.rs` resolves it at boot, and a link on the command
 line still wins over it.
 
-**Sidebar sections only ever expand on their own.** `SidebarLeft` opens Your Library or Settings
+**Sidebar sections only ever expand on their own.** `SidebarLeft` opens Your Library or Local Music
 whenever the route enters one (`expanded(&Destination)` in `sidebar_left.rs`), but nothing collapses
 a group except the chevron — leaving through a card, back/forward or an external `spotify:` link
 keeps it open. Don't reintroduce route-driven collapsing.
 
-**The Your Library, Local Music and Settings rows navigate nowhere.** They are expanders: a click
-toggles the group and nothing else, so a route change only ever comes from a tab underneath. That is
-also why an overlaid `SidebarLeft` survives opening a group — it dismisses on navigation, and there
-is none.
+**The Your Library and Local Music rows navigate nowhere.** They are expanders: a click toggles
+the group and nothing else, so a route change only ever comes from a tab underneath. That is also
+why an overlaid `SidebarLeft` survives opening a group — it dismisses on navigation, and there is
+none. Settings is a plain entry that leads to `Destination::Settings(SettingsTab::General)`.
 
-**Local Music is a top-level route that reuses `LibraryView`.** `Destination::Local(LocalTab)` owns
-the imported library, and `Root` builds a second `LibraryView` with `Shelf::Local`; the shelf picks
-the state (`Library::local_state`, `local_favorites`) and the settings keys, and every
-`TableSource` takes it through a `shelved(.., local)` constructor. Local Music adds a Songs section
-holding every scanned track, with a heart on each row, beside the Favorites section the streaming
-shelf also has. Its `local-*` settings keys and the `nav-local` i18n key keep the old names so
-stored layouts survive; `Screen::Imported` keeps the stored id `imported` for the same reason.
-Rename the value, not the key.
+**Settings is one page.** `SettingsView` draws the rows of the current category, and
+`SettingsHeader`, a second entity holding the view, draws the search field with a `TabBar` of
+every `SettingsTab` under it; the sidebar lists no categories. `Root` hands the header to
+`Workspace::set_content` beside the page, and the workspace floats it over the top of the page,
+painted after the transition's veil and scrim, so a category switch fades the rows and the header
+stays put while the rows scroll beneath it. The header measures itself with
+`on_children_prepainted` and hands the height to `SettingsView::set_header_height`, which is the
+page's top padding, so nothing about the header's size is guessed from metrics. Behind the field
+and the bar the header lays a veil for readability: the page colour fading out downward over a
+backdrop blur faded in the same way, skipped when `shared::effects()` is off. Over flat page the
+blur shows nothing, as any blur does: what reads as a surface is the smear of the rows beneath,
+so the fade stays light enough to leave it visible. The renderer
+blurs a run of consecutive backdrops once, by the widest radius among them, and honours each
+one's opacity, so the veil's strips share one radius and fade it in through opacity, one blur pass
+a frame. Interleaving anything between the strips splits them into a pass each, which lags. A category
+click calls `select` on the view and then `navigate`, so back and forward work as they did, and
+`select` clears the search, so a route always lands on a plain page. Every row builder returns a
+`Setting`, which carries the title and detail beside the element. While the field has text, `found`
+scores the rows of every category with `shared::text::fuzzy` and lists the hits best first, group
+titles left out, so nothing else on the page mixes categories.
+
+**A library has a shape, and the shape decides what its pages list.** `music::Shape` sits on
+`ProviderSession` beside `authenticated` and `playcounts`. `Saved` means the library is what the
+user starred, read through the `saved_*` methods; Spotify and YouTube say so. `Catalog` means the
+library is everything the provider has, read through `all_tracks`, `all_albums` and `all_artists`,
+with the `saved_*` set loaded beside it for hearts and a Favorites only filter; Local and any
+self-hosted server say so. The `saved_*` methods mean favorites on every provider, and the `all_*`
+methods default to an empty list, so a `Saved` provider never implements them. Spotify and YouTube
+get no filter, since their lists are the favorites already.
+
+**A library page shows its first rows before its last have arrived.** `Library` reads the
+songs, albums and artists of a shelf through the `*_paged` methods of `MusicApi`, which answer a
+`music::Pages<T>`: a channel of `Page { total, items }`, closed after the last page or carrying
+the error a page broke on. Every `*_paged` method defaults to `music::whole(self.all_*().await?)`,
+one page, so a provider that lists in one go writes nothing; Apple answers a real stream, with
+Apple's `meta.total` on the first page. `Library::expected(shelf, part)` is that total, and the
+page header shows it in place of the rows so far while a part is still arriving. A part in
+flight is still `loading`, so a vacancy is never drawn under rows that are only late.
+
+**A shelf opens on what it held last time.** `state::snapshot` keeps every row of every part in
+`storage::Cache`, a key to text store in `$XDG_CACHE_HOME/sonora/cache.sqlite`. Nothing there is
+anything but a copy of what the provider or `state.sqlite` already holds, so deleting the file
+costs one reload and never a favorite, a play or a playlist. One key is one list:
+`<provider slug>/<part>`, plus `starred-` for the favorites a `Catalog` shelf keeps beside its
+rows (`apple/songs`, `apple/starred-albums`, `local/artists`). A provider owns one shelf, so its
+slug is the whole prefix and `Cache::forget` drops it by that. The value is one json object,
+`{ shape, total, rows }`, where `rows` is the model list itself and `total` is what the header
+shows until this run's rows arrive.
+
+`Library::prime` puts those rows up at startup, before the session has even restored, and leaves
+every part awaited, so the page reads as loading. `Held::stale` names the parts still showing
+them; the first rows a provider sends for such a part replace them rather than join them, which
+is what `shed` is for. A part that fails keeps them, so a launch without a network still shows a
+library. The favorites are primed the same way and a load no longer clears them, so a Favorites
+only filter has something to filter from the first frame instead of emptying the page until the
+`saved_*` fetch lands. `Library::keep` records a list once it has arrived whole, and signing out
+of a provider drops everything filed under its slug. Snapshots are metadata only: covers still
+come from the image cache and nothing is playable that the provider has not confirmed.
+
+**Favorites and the library can be two things.** `Capabilities::library` says the provider has a
+library apart from its favorites, which a track or an album is put into and taken out of through
+`MusicApi::set_in_library`; Apple has, Spotify has not (its library is the favorites) and a
+self-hosted server has not (its library is fixed). The context menus add an Add to Library entry
+beside the favorites one only where the flag is on, and `Library::in_library` answers from the
+shelf's pages, which on such a provider are the library. Taking the heart off something on a
+`Shape::Catalog` shelf asks nothing, since the library underneath stays put; `Confirm::unstarring`
+is the one place that decides.
+
+**Two shelves, one code path.** `state::Shelf::{Streaming, Local}` names the two providers that can
+be live at once, and `Shelf::of(id)` routes an id by its prefix. `Library` holds one `Held` per
+shelf with the same loading, landing and favorites code, and every accessor takes the shelf:
+`state(shelf)`, `loading(shelf, part)`, `part_failed(shelf, part)`, `shape(shelf)`. `Session`
+answers `client_of(shelf)` and `shape_of(shelf)`. Do not add a `local_*` twin of anything; branch
+on `Shelf` or on `Shape`.
+
+**Local Music is a top-level route that reuses `LibraryView`.** `Destination::Local(LibraryTab)` owns
+the imported library, and `Root` builds a second `LibraryView` with `Shelf::Local`; both routes
+share `LibraryTab`, so the two shelves have the same four tabs, Songs included, whatever the shape.
+Every `TableSource` takes the shelf
+through a `shelved(.., shelf)` constructor. The `local-*` settings keys and the `nav-local` i18n key
+keep the old names so stored layouts survive; `Screen::Imported` keeps the stored id `imported` for
+the same reason. Rename the value, not the key.
 
 **Local files carry their own metadata.** `music::local::wire` resolves artwork by convention:
 embedded picture, then `cover`/`folder` beside the track, then the same beside the album folder;
@@ -626,12 +781,47 @@ an artist folder answers to `artist` first, then `folder`, then `cover`, in jpg,
 answers. `state::Tags` owns the read and the write and rescans the folder afterwards;
 `views::shared::tag_editor` is the dialog.
 
-**Saved tracks are called Favorites.** `LibraryTab::Songs`, `Section::Favorites`, the `songs`
-settings key and `library-liked-songs` all keep their old names; only the wording changed. Local
-favorites live in the local tables of `state.sqlite` and reach the same
-`MusicApi::set_track_saved` path, so
-`Library::saved`/`toggle` route by `music::is_local_id`. `MusicApi::all_tracks` is the odd one out:
-it defaults to `saved_tracks` and only the local provider gives it a different answer.
+**A scan reads tags on several threads and says how far it has got.** `scan::read_tags` splits
+the walked files into contiguous chunks, one per core up to `MAX_READERS`, and joins the chunks
+in order, so the songs list and the album grouping see exactly the order a single thread would
+have produced. The cap is there for a spinning disk, which past a handful of readers seeks more
+than it reads. Progress goes out through `music::progress`, atomics a reader samples, since the
+workers have no channel back to the app: `music::local::scan` holds the guard, `state::Scan`
+samples it every 100ms while `Session::scanning` is true, and the sampling stops with the scan.
+The walk counts what it has found so far, the folders count towards the total beside the files,
+and the percentage only appears once the walk has settled on one, so nothing sits at full while
+a later pass runs. The guard carries a generation, and `progress::cancel` bumps it:
+`Session::set_local_folders` calls that before every scan, so removing a folder stops the scan
+reading it and two scans never fight over one disk. A scan cut short reports no time, which is
+what `progress::interrupted` is for. `Scan::asked` is set by the Rescan button alone, so only a scan the user
+asked for leaves a `Done in …` behind, and `Scan::viewing_settings`, which `Root::show` calls on
+every move, clears that note once the settings page has shown it and been left. An empty Local
+Music page shows the count in place of its vacancy through `LibraryView::scanning`, and a scan in
+flight also holds off `LibraryView::unconfigured`, since a folder only reaches the settings once
+its scan lands and the setup screen would otherwise cover the whole first import.
+
+**Only what changed is read.** `music::local::index` keeps every file's time, size and parsed
+tags, and every folder's time, in `local_files` and `local_folders` in `cache.sqlite`. A folder
+whose time matches is listed from the index rather than from the disk, and the files in it are
+never stat'd, let alone opened; anything else is read as before. `Changes::between` works out
+what to write back, so a scan that found nothing writes nothing, and deletions are limited to the
+roots the walk actually reached, which is what keeps an offline share from wiping its own rows.
+A folder's time only moves when an entry is added, removed or renamed, so an edit in place hides
+from it: `LocalClient::set_track_tags` drops the rows of the files it wrote, and the Rescan
+button goes through `MusicProvider::forget_scan` to drop every folder, which is the whole
+difference between a rescan and the one at startup. The index is read on threads too, since
+turning ten thousand rows back into tracks is the entire cost of a scan that changed nothing.
+`wire::track_from_file` hands back the tag's year beside the track for the same reason: dating
+an album used to reopen one file per album on every scan, which was most of a scan on a share.
+Measured on ten thousand files: 245ms against 104ms on a local disk, and 99s against 3.1s over
+a network mount.
+
+**Saved tracks are called Favorites.** `LibraryTab::Songs`, the `songs` settings key and
+`library-liked-songs` all keep their old names; only the wording changed. Local favorites live in
+the `favorites`, `favorite_albums` and `favorite_artists` tables of `state.sqlite` and reach the
+same `MusicApi::set_*_saved` paths, so `Library::saved`/`toggle` route by `Shelf::of`. Hearts read
+the starred set on a `Catalog` shelf and the listed items on a `Saved` one. The songs table of a
+`Saved` shelf draws no heart at all, since every row there is a favorite already.
 
 **Which entries the sidebar shows is a setting.** `NavEntry::ALL` (router) is the list; a hidden one
 is stored by id in `hidden_nav` and read through `AppSettings::nav_shown`. Your Library still needs
@@ -655,7 +845,10 @@ force the content view out of its `cached` layout path for the length of the ani
 `FullscreenView`; `Root` swaps between them. A shell owns its own chrome — `Workspace` builds both
 sidebars and the player bar — and answers for its title bar through the `shells::Shell` trait
 (`title_bar(content, cx) -> TitleBarOptions`). `Root` supplies only the current screen's toolbar and
-asks the active shell; it never reaches into a panel.
+asks the active shell; it never reaches into a panel. `Workspace::set_content` takes the page
+and an optional header: the header floats over the top of the page, painted last so the veil and
+the scrim never touch it, and it arrives with the page, so it cannot outlive its screen. A screen
+with a header pads its own content to start beneath it.
 
 **New screen checklist:** add a `Destination` variant → add a state entity if it loads data → add
 the view under `crates/views/src/` → construct it in `Root::new` and wire it in `Root::show` →
@@ -663,10 +856,9 @@ add a sidebar entry in `views/src/chrome/sidebar_left.rs` if it's top-level.
 
 **New library section checklist:** `LibraryView` keeps one `TableState` per `Section`, and the
 fixed-size arrays (`views`, `sliders`, `Section::ALL`, `tables()`) are all indexed by
-`Section::slot()` — a new section means bumping every one of them, plus a `LibraryTab` or
-`LocalTab` variant, a `key(shelf)` for settings persistence, a `vacancy(shelf)` i18n key, a card
-renderer, a `deck` arm and a `LIBRARY_TABS` or `LOCAL_TABS` entry. `library/artists.rs` is the
-smallest complete example.
+`Section::slot()` — a new section means bumping every one of them, plus a `LibraryTab` variant, a
+`key(shelf)` for settings persistence, a `vacancy(shelf, shape)` i18n key, a card renderer, a `deck`
+arm and a `LIBRARY_TABS` entry. `library/artists.rs` is the smallest complete example.
 
 **Tables.** Implement `TableSource` (`columns`, `rows`, `cell`, and optionally `compare`, `matches`,
 `playing`, `is_loading`), define a `&'static [ColumnSpec<Field>]`, hold a
@@ -685,6 +877,16 @@ in `chrome::tools` (`columns`, `filters`, `sorts`, `views`) rather than writing 
 screen owns one `ui::Popovers` so only one of its popovers is open at a time, and holds its own
 `tools::Sliders` cache so scrubber positions survive across frames (`LibraryView` keeps one per
 section, so tab switches cannot bleed).
+
+**A cookie sign-in is the app's own browser window, nothing else.** `MusicProvider::web_sign_in`
+describes it: the url to load, the host that means the user is through, the cookie domain to
+collect and the proof cookie names. When `SignInPrompt::Secret` arrives, `Session::open_window`
+puts up a `webview::Login` and polls it; the header it produces goes through `submit_input`, and
+closing the window cancels the sign-in. There is no paste fallback and no modal: `Session::offered`
+drops `SignIn::Secret` from a provider's options unless `webview::supported()` and the provider
+describes a window, so a platform without a backend simply does not list it. A shared browser
+profile rotates Google's session cookies from any open tab and kills a copied header within
+hours; the throwaway session has no tab left to do that.
 
 **Filtering.** Implement `chrome::Searchable` on the view; `Toolbar::bind` binds it to the search
 field in the title bar. Don't build a second search box.
@@ -754,6 +956,33 @@ distributing unlicensed code.
 - Dependencies go in the root `[workspace.dependencies]`, then `dep.workspace = true` in the crate.
   `gpui`/`gpui_platform` are pinned to one git rev — bump both together or the build breaks.
 
+## Issue triage
+
+A new issue is labelled, routed and checked for missing context by `.github/workflows/triage.yml`,
+which runs `.github/triage/triage.sh` against any OpenAI compatible endpoint. The model only ever
+answers with JSON. The script does every GitHub write, and it drops any label, platform or person
+that `.github/triage/config.yml` does not name, so a bad answer can at worst pick the wrong label
+off a fixed list. Adding an area means adding it to that config, to `.github/labeler.yml` and to the
+repository's labels, all three.
+
+Comments, labels and closes come from the Sonora Buddy GitHub App, so the timeline carries its
+name and the Sonora icon rather than github-actions. `SONORA_BUDDY_APP_ID` is a repository
+variable and `SONORA_BUDDY_KEY` holds its private key. Both are optional: with the variable
+unset every workflow falls back to `GITHUB_TOKEN` and behaves the same, signed by Actions.
+
+`TRIAGE_API_KEY` holds the inference key. Setting the `TRIAGE_BASE_URL` or `TRIAGE_MODEL` repository
+variable overrides the endpoint or the model without a commit. Run a decision locally without
+touching the issue:
+
+```sh
+ISSUE=612 REPO=sonorahq/sonora DRY_RUN=1 TRIAGE_API_KEY=… .github/triage/triage.sh
+```
+
+A report that is missing something gets one comment asking for it and the `needs-info` label, which
+`stale.yml` closes on after 17 days. The same workflow re-runs when the reporter comments, and takes
+the label off once the report is complete, so the clock only runs while the ball is in their court.
+Pull requests get path labels from `actions/labeler` and are never closed as stale.
+
 ## Commits
 
 Conventional Commits: `type(scope): description`, imperative, lowercase, no trailing period, no body.
@@ -795,3 +1024,7 @@ is incomplete. Cutting a release therefore takes three steps:
 Entries are user-facing sentences under `Added` / `Changed` / `Fixed`, not commit subjects: say what
 someone using Sonora can now do, and leave out work no user can observe. Add to `## [Unreleased]` as
 features land so cutting a release is only a rename.
+
+**Keep every entry to one or two short sentences.** The release notes are posted to Discord and read
+there, so a paragraph per entry is worse than a terse line. Name the change and stop: no setup
+instructions, no rationale, no list of the settings it lives under.

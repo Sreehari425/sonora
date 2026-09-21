@@ -13,12 +13,13 @@ bundled-sqlite = ["state/bundled-sqlite"]
 anyhow.workspace = true
 dirs.workspace = true
 env_logger.workspace = true
+futures.workspace = true
 log.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 i18n.workspace = true
 icons.workspace = true
-music.workspace = true
+music = { workspace = true, features = ["widevine"] }
 state.workspace = true
 storage.workspace = true
 input.workspace = true
@@ -26,6 +27,7 @@ router.workspace = true
 ui.workspace = true
 views.workspace = true
 reqwest.workspace = true
+rustls.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 interprocess.workspace = true
@@ -44,8 +46,15 @@ objc2-app-kit.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 raw-window-handle.workspace = true
+resvg.workspace = true
 state = { workspace = true, features = ["bundled-sqlite"] }
+widestring.workspace = true
+windows.workspace = true
 windows-sys.workspace = true
+
+[dev-dependencies]
+# only the apple-login example, which puts up a sign-in window without the app around it
+webview.workspace = true
 
 [build-dependencies]
 embed.workspace = true

@@ -1,3 +1,5 @@
+use std::fs::File;
+use std::io::{self, Read, Seek, SeekFrom};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow};
@@ -6,7 +8,7 @@ use rodio::Source as _;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use super::wire;
-use crate::audio::{Output, Volume};
+use crate::audio::{Chain, Output, Volume};
 use crate::spectrum::Spectrum;
 use crate::{PlaybackConfig, PlaybackEvent, PlaybackEvents, PlaybackFactory, Player};
 
@@ -16,6 +18,7 @@ enum Command {
     Load {
         id: String,
         at: Option<Duration>,
+        play: bool,
         seamless: bool,
     },
     Preload {
@@ -56,11 +59,12 @@ struct Engine {
 }
 
 impl Player for Engine {
-    fn load(&self, track_id: &str, seamless: bool) -> Result<()> {
+    fn load(&self, track_id: &str, at: Duration, seamless: bool) -> Result<()> {
         self.commands
             .send(Command::Load {
                 id: track_id.to_owned(),
-                at: None,
+                at: (!at.is_zero()).then_some(at),
+                play: true,
                 seamless,
             })
             .context("cannot reach local playback engine")
@@ -71,6 +75,7 @@ impl Player for Engine {
             .send(Command::Load {
                 id: track_id.to_owned(),
                 at: Some(at),
+                play: false,
                 seamless: false,
             })
             .context("cannot reach local playback engine")
@@ -120,6 +125,30 @@ struct Slot {
     length: Option<Duration>,
 }
 
+/// A file read from `skip` on, with every position counted from there, so the decoder never
+/// sees the ID3v2 tag in front of the audio. A seek back to the first frame then lands on that
+/// frame, not inside the tag, where a cover picture can pass for a frame header.
+struct Audio {
+    file: File,
+    skip: u64,
+}
+
+impl Read for Audio {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.file.read(buf)
+    }
+}
+
+impl Seek for Audio {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        let pos = match pos {
+            SeekFrom::Start(at) => SeekFrom::Start(at.saturating_add(self.skip)),
+            relative => relative,
+        };
+        Ok(self.file.seek(pos)?.saturating_sub(self.skip))
+    }
+}
+
 fn run(
     config: PlaybackConfig,
     commands: UnboundedReceiver<Command>,
@@ -145,7 +174,12 @@ async fn engine_loop(
     events: UnboundedSender<PlaybackEvent>,
     spectrum: Spectrum,
 ) {
-    let output = match Output::open(Volume::new(config.gain), spectrum) {
+    let chain = Chain {
+        volume: Volume::new(config.gain),
+        equalizer: config.equalizer.clone(),
+        spectrum,
+    };
+    let output = match Output::open(chain) {
         Ok(output) => output,
         Err(error) => {
             log::error!("playback: cannot open audio output: {error:#}");
@@ -171,7 +205,7 @@ async fn engine_loop(
             command = commands.recv() => {
                 let Some(command) = command else { break };
                 match command {
-                    Command::Load { id, at, seamless } => {
+                    Command::Load { id, at, play, seamless } => {
                         let segued = seamless
                             && at.is_none()
                             && current.as_ref().is_some_and(|slot| slot.id == id);
@@ -201,9 +235,9 @@ async fn engine_loop(
                         match load(&sink, &id) {
                             Ok(slot) => {
                                 place(&sink, &id, at);
-                                match at {
-                                    Some(_) => sink.pause(),
-                                    None => sink.play(),
+                                match play {
+                                    true => sink.play(),
+                                    false => sink.pause(),
                                 }
                                 if let Some(length) = slot.length {
                                     events.send(PlaybackEvent::Length {
@@ -213,7 +247,7 @@ async fn engine_loop(
                                 }
                                 prev_len = sink.len();
                                 current = Some(slot);
-                                playing = at.is_none();
+                                playing = play;
                                 let position = at.unwrap_or_default();
                                 events
                                     .send(match playing {
@@ -280,7 +314,7 @@ async fn engine_loop(
                             if let Err(error) = sink.try_seek(position) {
                                 log::warn!("playback: cannot seek: {error}");
                             }
-                            events.send(PlaybackEvent::Position {
+                            events.send(PlaybackEvent::Seeked {
                                 id: Some(slot.id.clone()),
                                 at: sink.get_pos(),
                             }).ok();
@@ -346,16 +380,24 @@ fn place(sink: &rodio::Player, id: &str, at: Option<Duration>) {
 fn load(sink: &rodio::Player, id: &str) -> Result<Slot> {
     let path =
         wire::path_from_track_id(id).ok_or_else(|| anyhow!("{id} is not a local track id"))?;
-    let file =
+    let mut file =
         std::fs::File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
     let length = file.metadata().ok().map(|meta| meta.len());
-    let reader = std::io::BufReader::new(file);
+
+    let skip = wire::id3v2_end(path);
+    if skip > 0 {
+        let _ = file.seek(SeekFrom::Start(skip));
+    }
+    let gapless = !wire::has_lying_xing_frame_count(path, skip);
+    let reader = std::io::BufReader::new(Audio { file, skip });
 
     let mut builder = rodio::Decoder::builder()
         .with_data(reader)
-        .with_seekable(true);
+        .with_seekable(true)
+        .with_gapless(gapless);
+
     if let Some(length) = length {
-        builder = builder.with_byte_len(length);
+        builder = builder.with_byte_len(length.saturating_sub(skip));
     }
     let source = builder.build().context("cannot decode audio")?;
     let duration = source.total_duration();

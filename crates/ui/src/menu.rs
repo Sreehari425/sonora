@@ -5,14 +5,15 @@ use std::time::Duration;
 use gpui::prelude::*;
 use gpui::{
     Anchor, AnyElement, AnyWindowHandle, App, Bounds, ClickEvent, Div, ElementId, Entity, Global,
-    Interactivity, MouseButton, Pixels, Point, ScrollWheelEvent, SharedString, Size, Stateful,
-    StyleRefinement, Window, anchored, deferred, div, point, px, svg,
+    Interactivity, MouseButton, MouseClickEvent, MouseDownEvent, Pixels, Point, ScrollWheelEvent,
+    SharedString, Size, Stateful, StyleRefinement, Window, anchored, deferred, div, point, px, svg,
 };
 
 use crate::Artwork;
 use crate::metrics::snapped;
 use crate::motion::Rising as _;
 use crate::scrollbar::Scrollbar;
+use crate::scroller::middle_scroll;
 use crate::separator::Separator;
 use crate::shield::Shield;
 use crate::theme::ActiveTheme as _;
@@ -25,7 +26,13 @@ const SUBMENU_CLOSE_DELAY: Duration = Duration::from_millis(160);
 const SUBMENU_FALLBACK_WIDTH: Pixels = px(236.);
 const SUBMENU_TOP: Pixels = px(-14.);
 const WINDOW_MARGIN: Pixels = px(8.);
+pub(crate) const TRIGGER_GAP: Pixels = px(4.);
 const PANEL_SLACK: Pixels = px(6.);
+/// How far the pointer has to travel from where a context menu was opened before letting go of
+/// the button picks the item under it. A plain click never moves this far, so it only opens the
+/// menu, while a press held and dragged onto an item behaves the way a context menu is expected
+/// to.
+const HOLD_REACH: f64 = 8.;
 const SAFE_X: Pixels = px(6.);
 const SAFE_Y: Pixels = px(12.);
 const NEAR: usize = Near::Bar as usize + 1;
@@ -46,6 +53,10 @@ impl Trigger {
     pub(crate) fn observe(&self, bounds: Vec<Bounds<Pixels>>) {
         self.0
             .set(bounds.into_iter().reduce(|one, other| one.union(&other)));
+    }
+
+    fn bounds(&self) -> Option<Bounds<Pixels>> {
+        self.0.get()
     }
 
     fn contains(&self, position: Point<Pixels>, slack: Pixels) -> bool {
@@ -129,6 +140,8 @@ impl SubmenuState {
         self.menu_bounds.set(Some(bounds));
     }
 
+    /// Whether the submenu opens to the left of its menu. Decided once from the panel width
+    /// measured last time it was open, or a guess before that; `measure_reach` corrects it.
     fn flipped(&self, viewport_width: Pixels) -> bool {
         if let Some(flip) = self.flip.get() {
             return flip;
@@ -141,18 +154,21 @@ impl SubmenuState {
             .get()
             .map(|bounds| bounds.size.width)
             .unwrap_or(SUBMENU_FALLBACK_WIDTH);
-        let flip = menu.right() + width + WINDOW_MARGIN > viewport_width;
+        let flip = flips(menu, width, viewport_width);
         self.flip.set(Some(flip));
         flip
     }
 
+    /// Re-decides the side once the submenu's real width is known, so a wrong guess flips it
+    /// and a submenu too wide for either side lands on the roomier one.
     fn measure_reach(&self, bounds: Bounds<Pixels>, window: &Window, cx: &mut App) {
-        if self.flip.get() == Some(true)
-            || bounds.right() + WINDOW_MARGIN <= window.viewport_size().width
-        {
+        let Some(menu) = self.menu_bounds.get() else {
+            return;
+        };
+        let flip = flips(menu, bounds.size.width, window.viewport_size().width);
+        if self.flip.replace(Some(flip)) == Some(flip) {
             return;
         }
-        self.flip.set(Some(true));
         cx.refresh_windows();
     }
 
@@ -308,6 +324,7 @@ pub struct Menu {
     header: Option<AnyElement>,
     hover_guard: Option<SubmenuState>,
     trigger: Option<Trigger>,
+    pressed: Option<Point<Pixels>>,
 }
 
 impl Menu {
@@ -324,6 +341,7 @@ impl Menu {
             header: None,
             hover_guard: None,
             trigger: None,
+            pressed: None,
         }
     }
 
@@ -339,6 +357,13 @@ impl Menu {
 
     pub(crate) fn trigger(mut self, trigger: Trigger) -> Self {
         self.trigger = Some(trigger);
+        self
+    }
+
+    /// Where the button that opened the menu went down. A menu that knows this lets go of the
+    /// button over an item to pick it, as long as the pointer moved `HOLD_REACH` away first.
+    pub(crate) fn pressed_at(mut self, at: Point<Pixels>) -> Self {
+        self.pressed = Some(at);
         self
     }
 
@@ -403,6 +428,7 @@ impl RenderOnce for Menu {
             header,
             hover_guard,
             trigger,
+            pressed,
         } = self;
 
         if let (Some(scrollbar), Some(guard)) = (scrollbar.as_ref(), hover_guard.clone()) {
@@ -472,6 +498,9 @@ impl RenderOnce for Menu {
                 .min_w_0()
                 .items_center()
                 .justify_between()
+                // The gap is part of the row's own width, so a menu widens rather than letting
+                // a trailing mark crowd the label.
+                .gap_3()
                 .px_3()
                 .when_else(detailed, |this| this.py_2(), |this| this.py_1())
                 .rounded(tucked)
@@ -523,25 +552,55 @@ impl RenderOnce for Menu {
                                 .when_some(detail, |this, detail| this.child(detail)),
                         ),
                 )
-                .when(selected || checked, |this| this.child("✓"))
-                .when(submenu.is_some(), |this| this.child("›"))
+                .when(selected || checked, |this| {
+                    this.child(div().flex_none().child("✓"))
+                })
+                .when(submenu.is_some(), |this| {
+                    this.child(div().flex_none().child("›"))
+                })
                 .when_some(submenu_state, |this, state| {
                     this.on_hover(move |hovered, window, cx| {
                         state.near(Near::Item, *hovered, window.window_handle(), cx)
                     })
                 })
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .when_some(press, |this, press| {
+                .when_some(press.map(Action::from), |this, press| {
+                    let released = press.clone();
+                    let release_action = press_action.clone();
                     this.on_click(move |event, window, cx| {
                         press(event, window, cx);
                         if let Some(action) = press_action.as_ref() {
                             action(event, window, cx);
                         }
                     })
+                    .when_some(pressed.filter(|_| !disabled), |this, from| {
+                        this.on_mouse_up(MouseButton::Right, move |event, window, cx| {
+                            if (event.position - from).magnitude() <= HOLD_REACH {
+                                return;
+                            }
+                            let click = ClickEvent::Mouse(MouseClickEvent {
+                                down: MouseDownEvent {
+                                    button: MouseButton::Right,
+                                    position: from,
+                                    modifiers: event.modifiers,
+                                    click_count: 1,
+                                    first_mouse: false,
+                                },
+                                up: event.clone(),
+                            });
+                            released(&click, window, cx);
+                            if let Some(action) = release_action.as_ref() {
+                                action(&click, window, cx);
+                            }
+                        })
+                    })
                 })
                 .when_some(submenu, |this, mut submenu| {
                     if submenu.menu.action.is_none() {
                         submenu.menu.action = action.clone();
+                    }
+                    if submenu.menu.pressed.is_none() {
+                        submenu.menu.pressed = pressed;
                     }
                     let gap_state = submenu.state.clone();
                     let reach_state = submenu.state.clone();
@@ -549,7 +608,7 @@ impl RenderOnce for Menu {
                         false => this,
                         true => this.child({
                             let flip_left = submenu.state.flipped(viewport_width);
-                            div()
+                            let panel = div()
                                 .absolute()
                                 .top(SUBMENU_TOP)
                                 .w(px(0.))
@@ -587,7 +646,8 @@ impl RenderOnce for Menu {
                                                 })
                                                 .child(submenu.menu.inline().relative()),
                                         ),
-                                )
+                                );
+                            deferred(panel).with_priority(priority + 1)
                         }),
                     }
                 })
@@ -599,7 +659,7 @@ impl RenderOnce for Menu {
                 scrollbar.read(cx).sync();
                 let gliding = scrollbar.clone();
 
-                div()
+                middle_scroll(div(), scrollbar)
                     .id("menu-scroll-content")
                     .flex()
                     .flex_1()
@@ -656,6 +716,10 @@ impl RenderOnce for Menu {
                 .min_w_0()
                 .min_h_0()
                 .gap_1()
+                .on_children_prepainted({
+                    let panel = panel.clone();
+                    move |bounds, _, _| panel.observe(bounds)
+                })
                 .child(div().w_full().py_1().child(header))
                 .child(body)
                 .into_any_element(),
@@ -666,13 +730,23 @@ impl RenderOnce for Menu {
         let mut overrides = overrides;
         let width = overrides.size.width.take();
         let ceiling = overrides.max_size.height.take();
-        let corner = match (
-            overrides.inset.left.is_some(),
-            overrides.inset.right.is_some(),
-        ) {
-            (false, true) => Anchor::TopRight,
-            _ => Anchor::TopLeft,
+        let right = overrides.inset.left.is_none() && overrides.inset.right.is_some();
+        let corner = match right {
+            true => Anchor::TopRight,
+            false => Anchor::TopLeft,
         };
+        let perch = trigger
+            .as_ref()
+            .and_then(|trigger| trigger.bounds())
+            .map(|bounds| {
+                let x = match right {
+                    true => bounds.right(),
+                    false => bounds.left(),
+                };
+                let position = point(x, bounds.top() - TRIGGER_GAP);
+                let offset = point(Pixels::ZERO, bounds.size.height + TRIGGER_GAP + TRIGGER_GAP);
+                (position, offset)
+            });
         let panel_looks = div()
             .on_children_prepainted({
                 let guard = hover_guard.clone();
@@ -715,11 +789,15 @@ impl RenderOnce for Menu {
 
         let rising = panel_looks.rising("menu-rise");
         let surface = match should_defer {
-            true => anchored()
-                .anchor(corner)
-                .snap_to_window_with_margin(WINDOW_MARGIN)
+            true => {
+                let anchored = anchored().anchor(corner);
+                match perch {
+                    Some((position, offset)) => anchored.position(position).offset(offset),
+                    None => anchored.snap_to_window_with_margin(WINDOW_MARGIN),
+                }
                 .child(rising)
-                .into_any_element(),
+                .into_any_element()
+            }
             false => rising.into_any_element(),
         };
 
@@ -785,6 +863,18 @@ fn arm(close: Close, cx: &mut App) {
 
     let armed = cx.global::<Escape>().0.clone();
     *armed.borrow_mut() = Some(close);
+}
+
+/// Picks the side a submenu of `width` opens on: the right when it fits, else the left when
+/// that fits, else whichever side has more room and lets it overlap the menu.
+fn flips(menu: Bounds<Pixels>, width: Pixels, viewport_width: Pixels) -> bool {
+    let right = viewport_width - menu.right() - WINDOW_MARGIN;
+    let left = menu.left() - WINDOW_MARGIN;
+    match (right >= width, left >= width) {
+        (true, _) => false,
+        (false, true) => true,
+        (false, false) => left > right,
+    }
 }
 
 fn grown(bounds: Bounds<Pixels>, x: Pixels, y: Pixels) -> Bounds<Pixels> {

@@ -14,12 +14,10 @@ use gpui::{
     AnyElement, App, Entity, Hsla, InteractiveElement as _, IntoElement as _, SharedString,
     Styled as _, WeakEntity,
 };
-use music::Track;
+use music::{Shape, Track};
 use router::Destination;
-use state::{Detail, History, Library, Origin, Playback, PlaybackState, Sonora};
-use ui::{
-    Button, Cell, ColumnSpec, Menu, Pin, ROW_GROUP, Scrollbar, TableSource, TableState, clock,
-};
+use state::{Detail, History, Library, Origin, Playback, PlaybackState, Shelf, Sonora};
+use ui::{Button, Cell, ColumnSpec, Menu, Pin, ROW_GROUP, Scrollbar, TableSource, TableState};
 
 use crate::shared::cells;
 use crate::shared::confirm::{Confirm, Kind};
@@ -152,6 +150,7 @@ pub(crate) struct TrackSource {
     provider: Rc<dyn Tracks>,
     playback: Entity<Playback>,
     is_liked: Option<Entity<Library>>,
+    starrable: Option<Shelf>,
     album: Option<Entity<Detail>>,
     playlist: Option<Entity<Detail>>,
     history: Option<Entity<History>>,
@@ -164,6 +163,23 @@ pub(crate) struct TrackSource {
 struct Spread {
     stamp: (usize, String, bool, bool),
     extent: Option<(f32, f32)>,
+}
+
+/// What the number at the head of a row counts.
+#[derive(Clone, Copy, PartialEq)]
+enum Numbering {
+    /// The row's place in the list, for anything that is not an album in order.
+    Listing,
+    /// The track's own number on the album.
+    Track,
+    /// The track's number behind its disc, for an album that spans more than one.
+    Disc,
+}
+
+/// The disc a track sits on. Providers disagree on what an absent disc tag means, so a
+/// single-disc album reads as disc one either way.
+fn disc(track: &Track) -> u32 {
+    track.disc_number.max(1)
 }
 
 impl TrackSource {
@@ -179,6 +195,7 @@ impl TrackSource {
             provider: Rc::new(provider),
             playback,
             is_liked: None,
+            starrable: None,
             album: None,
             playlist: None,
             history: None,
@@ -242,6 +259,59 @@ impl TrackSource {
     pub(crate) fn with_liked(mut self, library: Entity<Library>) -> Self {
         self.is_liked = Some(library);
         self
+    }
+
+    /// Offers a favorites filter, and hearts on the rows, only when the shelf lists more than the
+    /// favorites. Needs `with_liked`, which supplies the library both ask.
+    pub(crate) fn starrable(mut self, shelf: Shelf) -> Self {
+        self.starrable = Some(shelf);
+        self
+    }
+
+    fn catalog(&self, cx: &App) -> bool {
+        match (self.starrable, &self.is_liked) {
+            (Some(shelf), Some(library)) => library.read(cx).shape(shelf) == Shape::Catalog,
+            _ => false,
+        }
+    }
+
+    /// How the rows of this table are numbered. A catalog shelf holds only the files it was
+    /// given, so an album there is numbered by each track's own place in it and a missing file
+    /// leaves a gap.
+    fn numbering(&self, cx: &App) -> Numbering {
+        let Some(id) = self.album.as_ref().and_then(|album| album.read(cx).id()) else {
+            return Numbering::Listing;
+        };
+        if Sonora::global(cx).library.read(cx).shape(Shelf::of(id)) != Shape::Catalog {
+            return Numbering::Listing;
+        }
+
+        let tracks = self.provider.tracks(cx);
+        let first = tracks.first().map(disc);
+        match tracks.iter().any(|track| Some(disc(track)) != first) {
+            true => Numbering::Disc,
+            false => Numbering::Track,
+        }
+    }
+
+    /// The label a row rests at, or `None` to let the cell count the rows.
+    fn number(&self, track: &Track, cx: &App) -> Option<SharedString> {
+        if track.track_number == 0 {
+            return None;
+        }
+
+        match self.numbering(cx) {
+            Numbering::Listing => None,
+            Numbering::Track => Some(track.track_number.to_string().into()),
+            Numbering::Disc => Some(format!("{}.{}", disc(track), track.track_number).into()),
+        }
+    }
+
+    fn starred(&self, track: &Track, cx: &App) -> bool {
+        match (&self.is_liked, track.id.as_deref()) {
+            (Some(library), Some(id)) => library.read(cx).saved(id),
+            _ => false,
+        }
     }
 
     pub(crate) fn with_playlist(mut self, detail: Entity<Detail>) -> Self {
@@ -312,7 +382,9 @@ impl TrackSource {
             }
         };
 
-        cells::index(cell, state, track.playable, preload, press, cx)
+        let number = self.number(track, cx);
+
+        cells::index(cell, state, track.playable, number, preload, press, cx)
     }
 
     fn title_cell(
@@ -334,6 +406,10 @@ impl TrackSource {
 
     fn liked_button(&self, cell: &Cell<TrackField>, track: &Track, cx: &App) -> Option<AnyElement> {
         let library = self.is_liked.as_ref()?;
+        // on a saved shelf every listed track is a favorite, so the heart would say nothing
+        if self.starrable.is_some() && !self.catalog(cx) {
+            return None;
+        }
         let id = track.id.clone()?;
         let theme = *cx.theme();
         let state = library.read(cx);
@@ -436,6 +512,9 @@ impl TableSource for TrackSource {
             if !self.sieve.keeps(&track) {
                 return false;
             }
+            if self.sieve.favorites && !self.starred(&track, cx) {
+                return false;
+            }
             hits(&track, query)
         })
     }
@@ -446,7 +525,7 @@ impl TableSource for TrackSource {
         };
         let value = self.sieve.duration.unwrap_or(bounds);
 
-        vec![
+        let mut axes = vec![
             Filter::Range(
                 RangeAxis {
                     key: "filter-duration",
@@ -468,7 +547,15 @@ impl TableSource for TrackSource {
                 label: t!("filter-playable"),
                 on: self.sieve.playable,
             }),
-        ]
+        ];
+        if self.catalog(cx) {
+            axes.push(Filter::Flag(FlagAxis {
+                key: "filter-favorites",
+                label: t!("filter-favorites"),
+                on: self.sieve.favorites,
+            }));
+        }
+        axes
     }
 
     fn filter(&mut self, change: FilterChange, _cx: &App) -> bool {
@@ -483,6 +570,10 @@ impl TableSource for TrackSource {
             }
             FilterChange::Flag("filter-playable", value) => {
                 self.sieve.playable = value;
+                true
+            }
+            FilterChange::Flag("filter-favorites", value) => {
+                self.sieve.favorites = value;
                 true
             }
             FilterChange::Reset => {
@@ -548,7 +639,7 @@ impl TableSource for TrackSource {
                 track.playcount.map(cells::count).unwrap_or_default(),
                 detail,
             ),
-            TrackField::Duration => cells::dim(&cell, clock(track.duration), detail),
+            TrackField::Duration => cells::length(&cell, track.duration, detail),
             TrackField::Index => cells::blank(&cell),
         }
     }

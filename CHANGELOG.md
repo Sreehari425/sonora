@@ -7,7 +7,360 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- An artist page opens as soon as their profile and popular tracks arrive, and fills its
+  releases in behind that, so an artist with a thousand of them no longer leaves the page
+  blank for half a minute.
+- Scrolling an artist's releases stays smooth however long the discography is, and resizing
+  the window keeps the same releases in view.
+- A track played on its own now follows its station past the first batch on YouTube Music,
+  rather than starting over from the last track, and never replays what the queue has heard.
+- Radio now plays in the order the provider ranks it rather than shuffled.
+
+### Fixed
+
+- Covers no longer swap places with each other while a grid is scrolled quickly.
+
+## [0.38.0] - 2026-09-20
+
 ### Added
+
+- Fullscreen fills its background with colours drawn from the cover, and wears a dark palette
+  while it does, whatever theme the rest of the app is on. Settings > Appearance > Fullscreen
+  switches it off, and Ambient motion holds the colours still.
+- A Play last item on track, album, artist and playlist menus queues them for after everything
+  else.
+- The fullscreen visualizer can be drawn as a smooth wave instead of bars, one line per stereo
+  channel, or as both at once. The Visualizer setting under Appearance now picks between them
+  and holds the off switch.
+- Scanning local music shows how far it has got: a percentage beside Rescan in Settings, and the
+  count of files read on a Local Music page that has nothing to show yet. A rescan you asked for
+  reports how long it took when it finishes.
+- The Windows installer offers a per-user install that needs no administrator privileges,
+  alongside the existing machine-wide one.
+
+### Changed
+
+- Sonora now notices the moment it loses the network and says so everywhere at once, rather than
+  leaving each page to fail on its own. Search, home, albums, playlists, artists, songs and
+  profiles show No connection over a crossed-out wifi mark with a Try again button, playing a
+  streamed track says there is no connection instead of failing quietly, and the pages come back
+  by themselves once the network does. Local music and an imported library keep working.
+- Losing the network no longer reads as a signed-out account. Sonora stays on your library and
+  your local music with the account it has, and picks the account back up on its own once the
+  network is there. The sign-in page now only appears when you really are signed out.
+- Your Library and Local Music open on the songs, albums, artists and playlists they held last
+  time, right at startup, and swap them for the fresh ones as the provider answers.
+- Local music is scanned on several threads, and only what changed since the last scan is read
+  again, so a large library on a disk or a network share opens in a fraction of the time. Rescan
+  still reads everything.
+- Removing a music folder stops a scan that is still reading it, instead of leaving it to finish
+  for nothing.
+- The log file is now capped at 16 MiB while Sonora runs, not only at startup, so a fault that
+  logs without end can no longer fill the disk.
+- Add to queue and Play next now line tracks up right after the current one, ahead of the rest of
+  the album or playlist, in the order you added them. The queue panel lists them under Next in
+  queue, above what the album or playlist plays next.
+- Settings is one page. A search box at the top finds a setting in any category, and the
+  categories sit in a bar at the bottom of the page instead of under Settings in the sidebar.
+- Radio builds its suggestions from the track that is playing rather than the last one in the
+  queue, and asks for the next batch while ten tracks are still left to play, so it never stops
+  to load between songs.
+- A context menu opens beside the pointer rather than under it, and holding the right button
+  down and letting go over an item picks that item.
+
+### Fixed
+
+- Signing in to Spotify works on accounts whose username holds a letter outside ASCII, such as
+  an ö, instead of failing straight after authentication.
+- The fullscreen button works right after picking a language or a typeface in Settings, instead
+  of doing nothing until you clicked elsewhere first.
+- An album, playlist or artist stops showing itself as playing once radio has moved past the
+  tracks it queued, instead of keeping a pause button over its cover.
+- Lyrics timed with hours, such as `[01:02:03.00]`, show at the right moment instead of being
+  skipped.
+- Lyrics that mark hundredths of a second with a colon, such as `[00:01:50]`, stay on time
+  instead of jumping a minute ahead.
+- Apple Music dates that include a timezone, such as `2026-09-15T12:03:39+00:00`, keep their
+  seconds and convert to UTC, instead of dropping the seconds.
+- A local album folder that ends with its year, like `Album - 1999` or `Album 2004`, keeps
+  that year instead of leaving the year blank.
+- An untagged song named like `01. Title` keeps the title and drops the track number, instead
+  of using the whole filename.
+- Deezer playlists and favorites show the day they were added or last changed, instead of leaving
+  the date column blank.
+- A Deezer song whose explicit flag arrives as a number still shows the explicit mark.
+- An untagged song whose filename splits title and artist with a fullwidth hyphen keeps both
+  names, instead of treating the whole filename as the title.
+- Opening a `file:///C:/…` link on Windows plays the file, instead of looking for a path that
+  starts with a slash.
+- The Play button on a library page no longer sits on Loading while the track you left off on is
+  being made ready to resume.
+- Listening history shows when you played a song in your own time zone instead of UTC.
+- Table filters such as the album year span or Favorites only are kept across restarts, the way
+  sorts and views already were.
+- Apple Music similar tracks link to their artist and album again.
+- Seeking back in a local MP3 with a PNG cover lands where you asked, instead of the song
+  starting over while the progress bar runs on.
+- An Apple Music library song whose catalog copy Apple has pulled is left out of Favorites,
+  and the song count leaves it out too, instead of failing when played.
+- Pinning an Apple Music album, artist or playlist to the sidebar works again. The pin is kept
+  by Sonora, since Apple Music has no pins of its own.
+- Deezer playlists found by search show who made them.
+- A Spotify pin past Spotify's own limit is kept by Sonora instead of being refused, so the
+  sidebar can hold as many pins as you like.
+- A YouTube Music track whose download stalls is tried again and then skipped, instead of
+  leaving the player silent until a restart.
+- A local album with a damaged tag no longer takes the day and month of its date, like `312`,
+  as its year.
+- The Modified column of local playlists shows the date they last changed instead of staying
+  blank.
+- An untagged song sitting directly in your music folder no longer takes the name of the folder
+  above it as its artist.
+- Saving the tag editor no longer erases a release date it could not read, like `99` or
+  `平成11年`, when the year was left alone.
+- Lyrics from Apple Music, Musixmatch, LrcLib and NetEase no longer go missing when the provider
+  sends a timestamp or song length out of range.
+- The local library no longer fails to load when a file's date tag is written like `平成11年` or
+  `２００４`.
+
+## [0.37.0] - 2026-09-17
+
+### Added
+
+- The AppImage can be updated through AppImageUpdate or an AppImage manager.
+- An Open log button under Settings > About opens the file Sonora logs to, for attaching to a
+  bug report.
+- Deezer as a provider: your favorites, playlists, albums and search, with FLAC playback where
+  the account allows it.
+- Apple Music as a provider: your library, playlists, search and stations.
+  Playback needs Google's Widevine module. Sonora uses the copy a browser on your computer has,
+  or offers to download it from Google and shows Google's terms first. Settings can remove a
+  downloaded module again.
+- Local files are a lyrics provider for the synced or plain lyrics embedded in them or kept in a
+  same-name `.lrc` file beside them, and can be preferred over the others.
+
+### Fixed
+
+- On Windows, the window minimizes, restores and closes with the system animations again.
+- On Windows, Sonora no longer keeps the installer's administrator privileges after an update,
+  so window managers like FancyZones can control it again.
+- A local album folder named like 10000 Days keeps its name instead of turning into 0 Days from
+  the year 1000.
+- Lyrics from a provider no longer go missing when its synced sheet carries a timestamp too large
+  to read.
+- Opening a file whose link has a `%` before a non-ASCII letter no longer crashes Sonora.
+- On Windows, launching Sonora while it sits in the tray brings the window back even when the
+  running copy was started with administrator privileges.
+- Saving the tag editor keeps the extra genres or artists and the full release date of fields
+  you left alone.
+- The local library no longer fails to load when a folder holds a tagged file whose name is not
+  valid Unicode.
+
+## [0.36.0] - 2026-09-15
+
+### Added
+
+- Sonora is published as an AppImage for `x86_64` and `aarch64`, beside the Flatpak and the
+  plain binaries. Make it executable and run it; it needs no installation and stays a single
+  file, but it does not update itself.
+- On Windows, hovering Sonora's taskbar button puts previous, play/pause and next under the
+  thumbnail preview, so a track can be paused or skipped without raising the window. The glyphs
+  follow the icon pack chosen under Settings > Appearance.
+- Buttons on the Discord status, under Settings, Discord. Pick Provider to link the track on the
+  service it plays from, Sonora to link the project page, or both. Discord shows them to your
+  friends only, never to you, and the provider button stays off while Hide details is on.
+- Sonora scrobbles to Last.fm, Libre.fm, ListenBrainz and Maloja, under Settings > Integrations.
+  Last.fm asks for your own API key and secret, Libre.fm only for approval in the browser,
+  ListenBrainz for a user token and Maloja for a server address and one of its API keys. Connect as
+  many as you like and every one of them gets the listen once you are halfway through a track. Each
+  has its own switch, which stops submissions without disconnecting the account.
+
+### Changed
+
+- Every language Sonora ships is translated in full. German, Spanish, French, Italian, Indonesian,
+  Japanese, Russian, Ukrainian, Polish, Brazilian Portuguese, Chinese and Turkish no longer fall
+  back to English for the equalizer, the sleep timer, the Discord status, pinned items or the
+  fullscreen controls.
+
+### Fixed
+
+- On Linux with an NVIDIA GPU, clicking Sign in on YouTube Music under Wayland closed Sonora with
+  a Wayland protocol error. The sign-in window now paints through shared memory on that driver,
+  the same as setting `WEBKIT_DISABLE_DMABUF_RENDERER=1` by hand. A value you export yourself is
+  left alone.
+- Libraries stopped at 10000 entries: a local folder with more songs than that listed only
+  the first 10000, and the same cap applied to albums, artists, playlists and every streaming
+  provider. Every list now loads in full.
+
+## [0.35.0] - 2026-09-14
+
+### Added
+
+- A ten band equalizer under Settings, Playback. Turn it on, pick a preset such as Bass boost or
+  Vocal, or drag the bands yourself; changes are heard as you make them, on every provider and on
+  local files alike.
+- A Hide fullscreen controls setting: Automatic fades the playback controls out while the pointer
+  is still, Always hidden keeps them away, and Always shown keeps them on screen.
+
+### Fixed
+
+- Some mp3 files remuxed by an old ffmpeg loaded fine and then played silence from start to end.
+  Their VBR header claims zero frames, and the gapless trim believed it; such files now play.
+- Switching the theme back to System picks up the light or dark mode the system is in now, even
+  if it changed while a fixed theme was selected.
+- On Linux under fractional scaling, a window whose size landed on half a device pixel showed a
+  thin strip of compositor blur along its right or bottom edge. Sonora now steps such a size down
+  by one pixel so the edge sits on the pixel grid.
+
+## [0.34.4] - 2026-09-12
+
+### Changed
+
+- Updated and completed the Indonesian translation.
+- Song lengths in tables and track lists use equal-width digits, so the column lines up.
+- Settings offers Paste cookies manually for YouTube Music beside the browser sign-in, so an
+  account can be connected that way without first removing every other provider.
+
+### Fixed
+
+- The left sidebar stays smooth with a long Pinned section or Show full library on. It used to
+  build every entry on every frame, even the ones scrolled out of view. Now it draws only the rows
+  on screen and rebuilds the list only when something in it changes.
+- On Nix, the YouTube Music sign-in no longer goes black after the email step. The package now
+  gives WebKit the GStreamer plugins it needs to play a page's media.
+- On Windows, the sign-in window opens when Sonora is installed under Program Files. It used to
+  fail with `0x80070005` because the browser it embeds tried to keep its data next to the program,
+  where a normal user cannot write. That data now lives under your local app data.
+- In the fullscreen view, the volume slider is no longer cut off when you hover the speaker button
+  while the controls are still sliding in.
+
+## [0.34.3] - 2026-09-12
+
+### Fixed
+
+- The cookie sign-in window opens natively on Wayland and no longer needs XWayland. It also opens
+  on desktops that export `GDK_BACKEND=wayland`, which used to fail with "cannot reach the display
+  server".
+- The Nix package can open the sign-in window: it now ships webkitgtk and the TLS module the page
+  needs, instead of reporting that webkit2gtk is not installed.
+- The left sidebar steps aside on the same frame the queue opens or closes, instead of waiting for
+  the next redraw.
+
+## [0.34.2] - 2026-09-12
+
+### Added
+
+- You can choose to show the track's artist, title, or both as the Discord status name, in addition
+  to Sonora, Provider, and Music.
+
+- Discord status can be configured to stay or hide when the track is paused.
+
+### Fixed
+
+- The Motion setting's System option now follows the operating system's reduced-motion preference
+  on Linux, macOS and Windows, refreshing when Sonora comes back to the foreground. Older Linux
+  portals that do not expose the standardized setting safely keep normal animations.
+- Local M4A files show their embedded cover art.
+- On Linux under Wayland, the cookie sign-in window draws its page instead of staying blank.
+- The arrow that floats over a scrolled queue brings the now-playing track back into view
+  instead of jumping to the top of the history. It only goes to the top when nothing is playing.
+
+## [0.34.1] - 2026-09-11
+
+### Fixed
+
+- The Flatpak can show what you are playing on Discord. It reaches the Discord socket whether
+  Discord is installed natively or as a Flatpak.
+
+## [0.34.0] - 2026-09-11
+
+### Added
+
+- Sonora shows up in Open With for audio files. Opening one plays it right away; opening several
+  queues them to play next, in order, right after whatever is already playing, whatever provider
+  that came from.
+
+- Sonora can put what you are playing on your Discord profile. Turn on Show on Discord under
+  Settings > Integrations. The status is called Sonora by default, and can name the service the
+  track came from or just say Music instead; it can carry a badge of that service, and it can hide
+  the details and say only that music is playing. Cover art reaches Discord only from Spotify and
+  YouTube Music, since Discord fetches the image itself and cannot read a local file or a
+  self-hosted server.
+
+- Sonora speaks Turkish. Pick Türkçe under Settings > General > Language, or leave the language
+  on System and it follows a Turkish desktop on its own.
+- Sonora speaks Chinese. Pick 简体中文 under Settings > General > Language, or leave the language on
+  System and it follows a Chinese desktop on its own.
+
+- The sidebar keeps one Pinned section for everything you pin, whatever provider it came from, so
+  a streamed album can sit between two local playlists. The order is the one you drag, and it
+  holds even where the provider cannot reorder its own pins. Click the heading to fold the
+  section away; it starts folded.
+
+- Pin sits in the context menu of every album, artist, playlist and song, not only the ones
+  already in the sidebar.
+
+- Pinning something from Spotify pins it in Spotify too, and anything pinned there turns up in
+  Sonora on its own.
+
+- The button beside Pinned sorts the section alphabetically or by type. Picking the same order
+  again turns it around, and once more hands the list back to the order you dragged.
+
+- Show full library, in that same menu, lists the rest of your albums, artists and playlists
+  under the pins, with a mark on the pinned ones.
+
+- A Back to top button appears in the sidebar and in the queue once either is scrolled, and
+  glides back rather than jumping.
+
+- YouTube Music signs in through a window Sonora opens itself, on macOS, Windows and Linux. Sign
+  in with Google there and Sonora takes the cookies it needs; the window keeps nothing, so
+  browsing YouTube or Gmail in your regular browser no longer signs Sonora out. On Linux it needs
+  webkit2gtk, which most desktops already have.
+
+### Changed
+
+- The tray menu draws the cover of the playing track beside its name, and clicking that row
+  opens the song page.
+- Hovering the tray icon names the playing track, the way it already did on Linux.
+- The sleep timer lives under Settings > Playback. Turn it on there and a Configure button opens
+  the slider; the moon button leaves the player bar.
+- Pasting a YouTube Music cookie header is gone. The sign-in window replaces it, and where Sonora
+  cannot open one only Guest mode is offered.
+
+### Fixed
+
+- A submenu that has no room beside its menu opens over it instead of under its rows, on whichever
+  side has more room. The Add to playlist list in a narrow window no longer shows the context menu's
+  items through it.
+- The song count on an album or playlist page follows a language change. It used to keep the
+  language the page was first opened in.
+
+## [0.33.0] - 2026-09-09
+
+### Added
+
+- Appearance settings carry a Blur switch, on by default, that draws the window over a blurred
+  desktop once the opacity drops below 100%. At full opacity the window stays plain and the switch
+  is greyed out.
+
+### Fixed
+
+- Playlists with more than 200 tracks load in full again. The remaining pages arrive in the
+  background after the first one shows.
+
+- Windows no longer draws its own minimize, maximize and close buttons beside the ones Sonora
+  draws in its title bar.
+
+- A maximized window on Windows stops at the taskbar instead of covering it.
+
+## [0.32.0] - 2026-09-09
+
+### Added
+
+- Windows on ARM gets a native build: releases carry an `aarch64-pc-windows-msvc` executable and a
+  `Sonora-Setup-arm64.exe` installer, and the in-app updater fetches that one on an ARM machine.
 
 - A Shuffle button sits beside Play on every album, playlist, artist and library page. It turns
   shuffle on and starts the collection from a random track.
@@ -19,17 +372,46 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   control keys (`⌃A`, `⌃E`, `⌃B`, `⌃F`, `⌃D`, `⌃H`, `⌃K`) do what they do everywhere else on a
   Mac. The menu bar gains Edit and Window menus and the usual Settings, Hide and Show All items.
 
+- A sleep timer pauses playback after 1 to 120 minutes, or at the end of the current track. Drag
+  the slider under the moon button in the player bar, and hide the button altogether under
+  Settings > Playback if you never use it.
+
+- Local albums and artists take a heart too: on their pages, in the library grids and in the
+  context menu.
+
+- Play from any Subsonic or OpenSubsonic server: Navidrome, Airsonic, Gonic and more. Sign in under
+  Settings > Accounts with the server address, a username and a password. Your Library then lists
+  the whole server, songs included, with a Favorites only filter for what you starred.
+
+- Sonora's own window corners can be rounded from Appearance, with the radius picked the same
+  way as the UI corner radius: Square, Subtle, Rounded or Round. On Windows this maps onto DWM's
+  own rounded presets; on Linux and FreeBSD it applies with client-side decorations, where the
+  compositor otherwise leaves the window square.
+- Window controls can be drawn as traffic-light dots from Appearance, on Windows and Linux. They
+  follow the existing controls-side setting, same as the standard controls.
+
+### Changed
+
+- Local Music lists every imported song, album and artist under the same four tabs as Your Library,
+  and a Favorites only filter narrows each of them to what you starred. The separate Favorites tab
+  is gone. Spotify and YouTube Music keep showing only what you saved.
+
 ### Fixed
 
-- A track that fails to load no longer stops playback. Sonora shows a toast, waits out the short
-  back-off and moves on to the next track in the queue, skipping the broken one even in repeat-one.
-- Local track lists keep each row's own embedded cover art when the table is sorted or recycled.
 - The Flatpak remote and the standalone bundles follow the repository to
   `sonorahq.github.io/sonora`. A remote added before the move needs
   `flatpak remote-modify --user --url=https://sonorahq.github.io/sonora/repo sonora` once.
 - The Flatpak shows its tray icon on KDE Plasma and other StatusNotifier desktops, so Close to
   tray keeps Sonora playing after the window closes. The sandbox forbids the well-known bus name
   the tray used to claim, and Sonora now registers under its unique connection name instead.
+- A track that fails to load no longer stops playback. Sonora shows a toast, waits out the short
+  back-off and moves on to the next track in the queue, skipping the broken one even in repeat-one.
+- Local track lists keep each row's own embedded cover art when the table is sorted or recycled.
+- Seeking, and starting a track, count as playing only once the audio actually comes out. The
+  lyrics and the progress bar wait at the target until then instead of running ahead while the
+  track buffers, and the old audio stops the moment you seek or pick another track. Seeking
+  repeatedly, as when clicking through the lyrics, no longer queues every position behind the
+  last. The play button follows what you asked for and flips the moment you press it.
 - On macOS, a socket file left behind by a crash no longer disables single-instance handling: the
   next launch notices nothing is listening, takes the socket over, and later launches and
   `spotify:` links reach that window again instead of opening a second Sonora.
@@ -107,6 +489,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - Local music cover thumbnails are cached under `$XDG_CACHE_HOME` instead of `$XDG_CONFIG_HOME`.
+- Passwords typed into a server login form are hidden as you type them.
+- Local albums list their tracks in playing order, by disc and track number, instead of the order
+  the folders happened to be read in.
+- A track from a Subsonic server starts as soon as the first seconds have arrived, instead of
+  after the whole file has downloaded. Seeking and skipping answer straight away, and the
+  progress bar follows the sound rather than the decoder.
+- The system Now Playing widget reads cover art from Sonora's own cache, so a cover that fails to
+  download no longer takes the app down on macOS, and the widget shows artwork offline.
 
 ## [0.29.0] - 2026-09-03
 
@@ -1351,7 +1741,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Initial release: a native Spotify client with playback, an interactive queue, the saved library,
 search, album, playlist, artist and song pages, context menus and adaptive theming.
 
-[unreleased]: https://github.com/sonorahq/sonora/compare/v0.31.0...HEAD
+[unreleased]: https://github.com/sonorahq/sonora/compare/v0.38.0...HEAD
+[0.38.0]: https://github.com/sonorahq/sonora/compare/v0.37.0...v0.38.0
+[0.37.0]: https://github.com/sonorahq/sonora/compare/v0.36.0...v0.37.0
+[0.36.0]: https://github.com/sonorahq/sonora/compare/v0.35.0...v0.36.0
+[0.35.0]: https://github.com/sonorahq/sonora/compare/v0.34.4...v0.35.0
+[0.34.4]: https://github.com/sonorahq/sonora/compare/v0.34.3...v0.34.4
+[0.34.3]: https://github.com/sonorahq/sonora/compare/v0.34.2...v0.34.3
+[0.34.2]: https://github.com/sonorahq/sonora/compare/v0.34.1...v0.34.2
+[0.34.1]: https://github.com/sonorahq/sonora/compare/v0.34.0...v0.34.1
+[0.34.0]: https://github.com/sonorahq/sonora/compare/v0.33.0...v0.34.0
+[0.33.0]: https://github.com/sonorahq/sonora/compare/v0.32.0...v0.33.0
+[0.32.0]: https://github.com/sonorahq/sonora/compare/v0.31.0...v0.32.0
 [0.31.0]: https://github.com/sonorahq/sonora/compare/v0.30.0...v0.31.0
 [0.30.0]: https://github.com/sonorahq/sonora/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/sonorahq/sonora/compare/v0.28.1...v0.29.0

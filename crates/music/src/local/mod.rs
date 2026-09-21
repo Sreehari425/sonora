@@ -1,43 +1,55 @@
 mod client;
+mod id3;
+mod index;
+mod lyrics;
 mod playback;
 mod scan;
 mod store;
 mod tags;
 mod wire;
 
+pub use lyrics::LocalLyrics;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, anyhow};
 use async_trait::async_trait;
-use storage::Database;
+use storage::{Cache, Database};
 
 use crate::{
-    InputSource, MusicApi, MusicProvider, PlaybackFactory, PromptSink, ProviderSession, SignIn,
-    UserProfile,
+    Capabilities, InputSource, MusicApi, MusicProvider, PlaybackFactory, PromptSink,
+    ProviderSession, Shape, SignIn, UserProfile,
 };
 
 pub struct LocalProvider {
     cache_dir: PathBuf,
     database: Database,
+    index: index::Index,
 }
 
 impl LocalProvider {
-    pub fn new(cache_dir: PathBuf, database: Database) -> Self {
+    pub fn new(cache_dir: PathBuf, database: Database, cache: Cache) -> Self {
         Self {
             cache_dir,
             database,
+            index: index::Index::new(cache),
         }
     }
 
-    async fn scan_path(&self, path: PathBuf) -> Result<ProviderSession> {
+    async fn scan_paths(&self, paths: Vec<PathBuf>) -> Result<ProviderSession> {
         let cache_dir = self.cache_dir.clone();
-        let scanned = tokio::task::spawn_blocking(move || scan::scan(&path, &cache_dir))
+        let index = self.index.clone();
+        let scanned = tokio::task::spawn_blocking(move || scan::scan(&paths, &cache_dir, &index))
             .await
             .context("local scan task panicked")?;
 
-        let api: Arc<dyn MusicApi> =
-            Arc::new(client::LocalClient::new(scanned, self.database.clone()));
+        let api: Arc<dyn MusicApi> = Arc::new(client::LocalClient::new(
+            scanned,
+            self.database.clone(),
+            self.cache_dir.clone(),
+            self.index.clone(),
+        ));
         let playback: Arc<dyn PlaybackFactory> = Arc::new(playback::Factory);
 
         Ok(ProviderSession {
@@ -47,8 +59,17 @@ impl LocalProvider {
             },
             api,
             playback,
+            shape: Shape::Catalog,
             authenticated: false,
-            playcounts: false,
+            // Files on disk: favorites are kept here, but nothing suggests a station and
+            // nothing counts a play.
+            capabilities: Capabilities {
+                follow_artists: true,
+                radio: false,
+                playcounts: false,
+                library: false,
+                pins: false,
+            },
         })
     }
 }
@@ -61,6 +82,14 @@ impl MusicProvider for LocalProvider {
 
     fn slug(&self) -> &'static str {
         "local"
+    }
+
+    fn forget_scan(&self) {
+        self.index.distrust();
+    }
+
+    fn listening_to(&self) -> &'static str {
+        "Local Music"
     }
 
     fn sign_in_options(&self) -> Vec<SignIn> {
@@ -81,12 +110,12 @@ impl MusicProvider for LocalProvider {
         _prompt: PromptSink,
         _input: InputSource,
     ) -> Result<ProviderSession> {
-        let SignIn::Path(path) = method else {
+        let SignIn::Path(paths) = method else {
             return Err(anyhow!(
                 "local files can only be configured with a folder path"
             ));
         };
-        self.scan_path(path).await
+        self.scan_paths(paths).await
     }
 
     fn sign_out(&self) {}

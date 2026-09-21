@@ -25,7 +25,6 @@ nav-search = Search
 nav-library = Your Library
 nav-settings = Settings
 nav-songs = Songs
-nav-favorites = Favorites
 nav-albums = Albums
 nav-playlists = Playlists
 nav-artists = Artists
@@ -42,14 +41,19 @@ library-play-liked-songs = Play
 library-no-songs = No favorites yet
 library-no-albums = No saved albums yet
 library-no-playlists = No playlists yet
-library-no-artists = No followed artists yet
+library-no-artists = No favorite artists yet
 library-no-local-songs = No imported songs found
-library-no-local-favorites = No local favorites yet
 library-no-local-albums = No imported albums found
 library-no-local-artists = No imported artists found
 library-no-local-playlists = No local playlists yet
+library-no-catalog-songs = No songs found
+library-no-catalog-albums = No albums found
+library-no-catalog-artists = No artists found
 library-no-matches = No matches
 library-not-loaded = Your library did not load
+library-scanning = Looking through your folders…
+library-scanning-found = Looking through your folders… { $found } so far
+library-scanning-progress = Reading your music… { $read } of { $found }
 library-part-not-loaded = This part of your library did not load
 library-local-unconfigured = Configure your local library
 
@@ -121,6 +125,8 @@ menu-remove-tracks-from-history = { $count ->
     [one] Remove { $count } track from history
    *[other] Remove { $count } tracks from history
 }
+menu-delete-track-file = Delete track file
+menu-delete-track-files = Delete { $count } track files
 menu-play-next = Play next
 menu-play-tracks-next = { $count ->
     [one] Play { $count } track next
@@ -130,6 +136,11 @@ menu-add-to-queue = Add to queue
 menu-add-tracks-to-queue = { $count ->
     [one] Add { $count } track to queue
    *[other] Add { $count } tracks to queue
+}
+menu-play-last = Play last
+menu-play-tracks-last = { $count ->
+    [one] Play { $count } track last
+   *[other] Play { $count } tracks last
 }
 menu-song-radio = Go to song radio
 menu-go-to-album = Go to album
@@ -147,6 +158,16 @@ menu-rename-playlist = Rename playlist
 menu-delete-playlist = Delete playlist
 menu-add-playlist-to-library = Add to Library
 menu-remove-playlist-from-library = Remove from Library
+menu-library-add = Add to Library
+menu-library-add-tracks = { $count ->
+    [one] Add { $count } track to Library
+   *[other] Add { $count } tracks to Library
+}
+menu-library-remove = Remove from Library
+menu-library-remove-tracks = { $count ->
+    [one] Remove { $count } track from Library
+   *[other] Remove { $count } tracks from Library
+}
 menu-make-playlist-public = Make public
 menu-make-playlist-private = Make private
 menu-open-album = Open album
@@ -167,7 +188,6 @@ playlist-again-add = Add again
 confirm-remove-library-title = Remove from library
 confirm-remove-playlist-title = Remove from playlist
 confirm-remove-history-title = Remove from history
-confirm-unfollow-title = Unfollow
 confirm-remove-songs = { $count ->
     [one] Remove this song from your library?
    *[other] Remove { $count } songs from your library?
@@ -184,26 +204,30 @@ confirm-remove-albums = { $count ->
     [one] Remove this album from your library?
    *[other] Remove { $count } albums from your library?
 }
-confirm-unfollow-artists = { $count ->
-    [one] Unfollow this artist?
-   *[other] Unfollow { $count } artists?
+confirm-remove-artists = { $count ->
+    [one] Remove this artist from Favorites?
+   *[other] Remove { $count } artists from Favorites?
 }
 confirm-remove-playlists = { $count ->
     [one] Remove this playlist from your library?
    *[other] Remove { $count } playlists from your library?
 }
+confirm-delete-track-files-title = Delete track files?
+confirm-delete-track-files = The file(s) will be permanently deleted from disk. This cannot be undone.
 
 # queue panel
 queue-title = Queue
 queue-history = History
 queue-now-playing = Now playing
 queue-from = From
+queue-next-in-queue = Next in queue
 queue-up-next = Up next
 queue-reset = Reset
 queue-clear = Clear
 queue-empty = Your queue is empty
 queue-similar = Similar tracks
 queue-radio = Autoplay similar tracks
+queue-return-playing = Back to now playing
 
 # player bar
 player-nothing-playing = Nothing playing
@@ -234,6 +258,7 @@ filter-duration = Duration
 filter-year = Year
 filter-explicit = Explicit only
 filter-playable = Playable only
+filter-favorites = Favorites only
 filter-owned = By you
 
 # view
@@ -259,23 +284,41 @@ login-problem-refused = Spotify turned down the sign-in. Wait a moment and try a
 login-problem-premium = Sonora streams through Spotify Premium, and this account does not have it. Sign in with a Premium account to continue.
 login-sign-in = Sign in with { $provider }
 login-connect-cookies = Paste cookies manually
+login-cookie-open = Open { $provider }
+login-cookie-submit = Continue
+login-cookie-hint = Paste the Cookie request header here
+login-cookie-step-1 = Open music.youtube.com and make sure you are signed in. An incognito window works best.
+login-cookie-step-2 = Press F12, open the Network tab and reload the page.
+login-cookie-step-3 = Select any request named "browse" or "next".
+login-cookie-step-4 = In Headers, find Cookie under Request Headers, right-click it and copy its value.
+login-cookie-step-note = Make sure to paste the whole value, including SAPISID and __Secure-3PAPISID.
+login-cookie-header-title = Paste your { $provider } cookies to finish signing in
+login-cookie-apple-step-3 = Select any request to { $site }.
+login-cookie-apple-note = Make sure to paste the whole value, including { $cookie }.
+login-cookie-named-title = Paste your { $provider } cookie to finish signing in
+login-cookie-named-hint = Paste the cookie value here
+login-cookie-named-step-1 = Open { $site } and make sure you are signed in.
+login-cookie-named-step-2 = Press F12 and open the Storage tab in Firefox, or the Application tab in Chrome.
+login-cookie-named-step-3 = Expand Cookies, select { $site } and find the cookie named { $cookie }.
+login-cookie-named-step-4 = Double-click its value and copy it.
+login-cookie-named-note = The { $cookie } value alone is enough. A whole Cookie header copied from the Network tab works too.
+login-window-title = Sign in to { $provider }
 login-use = Use { $provider }
 login-guest-title = Guest mode
 login-guest-use = Use Guest mode
 login-guest-detail = Browse and play without an account. Your library, likes and playlists stay out of reach.
 login-usage-consent = Help us estimate how many people use Sonora.
 login-device-code = Enter this code at { $url }
-login-cookie-open = Open YouTube Music
-login-cookie-submit = Continue
-login-cookie-hint = Paste the Cookie request header here
-login-cookie-step-1 = Open music.youtube.com and make sure you are signed in.
-login-cookie-step-2 = Press F12, open the Network tab and reload the page.
-login-cookie-step-3 = Select any request named "browse" or "next".
-login-cookie-step-4 = In Headers, find Cookie under Request Headers, right-click it and copy its value.
-login-cookie-step-note = Make sure to paste the whole value, including SAPISID and __Secure-3PAPISID.
-login-cookie-title = Paste your YouTube Music cookies to finish signing in
+login-server-title = Connect to your Subsonic server
+login-server-detail = Enter the address of any Subsonic or OpenSubsonic server (Navidrome, Airsonic, Gonic, …), then sign in with your server username and password. The session stays on this device.
+login-server-hint = https://music.example.com
+login-username-hint = Username
+login-password-hint = Password
+login-server-submit = Connect
 login-account-title = Choose an account
 login-account-detail = This session is signed in to more than one Google account. Pick the one Sonora should use.
+login-choose-title = Sign in to { $provider }
+login-choose-detail = Choose how to sign in to { $provider }.
 
 # album and playlist pages
 detail-album = Album
@@ -296,8 +339,6 @@ artist-monthly-listeners = { $count ->
    *[other] { $value } monthly listeners
 }
 artist-play = Play now
-artist-follow = Follow
-artist-unfollow = Unfollow
 artist-popular = Popular
 artist-popular-eyebrow = Explore this artist
 artist-popular-empty = Nothing to play from this artist yet
@@ -334,8 +375,6 @@ release-meta = { $year } • { $kind }
 
 # home page
 home-quick-picks = Quick picks
-home-listen-again = Listen again
-home-quick-picks-eyebrow = Start from a song
 home-quick-picks-empty = Like a few songs and they will show up here
 
 # powerbar (quick search)
@@ -442,10 +481,12 @@ month-11 = Nov
 month-12 = Dec
 
 # settings
+settings-search = Search settings
 settings-tab-general = General
 settings-tab-appearance = Appearance
 settings-tab-playback = Playback
 settings-tab-privacy = Privacy
+settings-tab-integrations = Integrations
 settings-theme = Theme
 settings-theme-detail = Choose the application colour palette
 settings-opacity = Opacity
@@ -454,8 +495,18 @@ settings-opacity-value = { $percent }%
 settings-theme-config = Open config
 settings-adaptive = Adaptive theme
 settings-adaptive-detail = Tint the palette with the artwork of the playing album
+settings-ambient = Ambient background
+settings-ambient-detail = Fill the fullscreen player with colours drawn from the cover
+settings-ambient-motion = Ambient motion
+settings-ambient-motion-detail = Drift the ambient colours instead of holding them still
 settings-visualizer = Visualizer
-settings-visualizer-detail = Show spectrum bars behind fullscreen artwork
+settings-visualizer-detail = How the spectrum is drawn behind fullscreen artwork
+settings-visualizer-style-none = Off
+settings-visualizer-style-bars = Bars
+settings-visualizer-style-wave = Wave
+settings-visualizer-style-both = Bars and wave
+settings-fullscreen-controls-autohide = Hide fullscreen controls
+settings-fullscreen-controls-autohide-detail = Fade out playback controls when fullscreen is inactive
 settings-icons = Icon pack
 settings-icons-detail = Choose the icon set the interface draws from
 settings-motion = Reduce motion
@@ -466,6 +517,8 @@ settings-saver = Battery saving
 settings-saver-detail = Cap the frame rate of animations while Sonora is not focused, applied from the next launch
 settings-corners = Corners
 settings-corners-detail = How rounded surfaces and controls are
+settings-blur = Blur
+settings-blur-detail = Draw the window over a blurred desktop. Needs an opacity below 100%
 settings-font = Font size
 settings-font-detail = Base text size, everything else scales with it
 settings-font-value = { $size } px
@@ -489,14 +542,93 @@ settings-server-side-decorations-detail = Let the compositor draw the title bar,
 settings-typeface-loading = Loading…
 settings-window-controls = Window controls
 settings-window-controls-detail = Draw minimise, maximise and close in the title bar
+settings-traffic-light-controls = Traffic light controls
+settings-traffic-light-controls-detail = Draw minimise, maximise and close as colored dots
+settings-window-rounding = Window corners
+settings-window-rounding-detail = How rounded the window's own corners are
 settings-controls-side = Controls side
 settings-controls-side-detail = Which end of the title bar the controls sit on
 settings-close-to-tray = Keep playing when closed
 settings-close-to-tray-detail = Keep Sonora in the system tray and continue playing after its window closes
+settings-discord = Show on Discord
+settings-discord-detail = Put the track you are playing on your Discord profile
+settings-discord-name = Status name
+settings-discord-name-detail = What the status is called after the "Listening to" that your friends see
+settings-discord-name-sonora = Sonora
+settings-discord-name-provider = Provider
+settings-discord-name-music = Music
+settings-discord-name-title = Title
+settings-discord-name-artist = Artist
+settings-discord-name-artist-title = Artist - Title
+settings-discord-show-paused = Show when paused
+settings-discord-show-paused-detail = Keep the status on your Discord profile while the track is paused
+settings-discord-badge = Show the provider badge
+settings-discord-badge-detail = Mark the status with a small icon of the service the track came from
+settings-discord-anonymous = Hide details
+settings-discord-anonymous-detail = Say only that music is playing, without the title, artist or artwork
+settings-discord-buttons = Buttons
+settings-discord-buttons-detail = Links under the status for your friends to open, one to the track on its service and one to Sonora
+settings-discord-buttons-pick = Choose buttons
+# the Discord status when the track is left out of it
+discord-listening = Listening to music
+get-sonora = Get Sonora
+settings-fullscreen-controls-autohide-automatic = Automatic
+settings-fullscreen-controls-autohide-always-hidden = Always hidden
+settings-fullscreen-controls-autohide-always-shown = Always shown
 settings-normalisation = Normalize loudness
 settings-normalisation-detail = Keeps tracks at a consistent volume
 settings-gapless = Gapless playback
 settings-gapless-detail = Runs one track into the next without a pause, the way an album was sequenced
+settings-sleep = Sleep timer
+settings-sleep-detail = Lets the music stop on its own after a set time, so it can play you to sleep
+settings-sleep-configure = Configure…
+settings-sleep-off = Off
+settings-sleep-end-of-track = End of track
+settings-sleep-minutes = { $count } mins
+settings-widevine = Widevine module
+settings-widevine-detail = Apple Music tracks are encrypted and need Google's Widevine module. Sonora uses the copy a browser here already has, or one it downloaded from Google with your consent.
+settings-widevine-none = Apple Music tracks are encrypted and need Google's Widevine module. No browser here has one, so Sonora can download it from Google with your consent.
+settings-widevine-looking = Looking…
+settings-widevine-asking = Waiting for your answer
+settings-widevine-fetching = Downloading…
+settings-widevine-installing = Installing…
+settings-widevine-installed = Found in a browser
+settings-widevine-fetched = Downloaded from Google
+settings-widevine-missing = Not installed
+settings-widevine-configured = Set by the environment
+settings-widevine-fetch = Download
+settings-widevine-uninstall = Uninstall
+confirm-uninstall-widevine-title = Uninstall the Widevine module?
+confirm-uninstall-widevine = Sonora deletes the copy it downloaded from Google. Apple Music tracks stop playing until it is downloaded again.
+widevine-prompt-title = Widevine module
+widevine-prompt-wanted = Apple Music tracks are encrypted and need Google's Widevine module. No browser on this computer has one. Sonora can download it from Google's servers, the same file Chrome installs, and keep it in its own folder.
+widevine-prompt-downloading = Downloading…
+widevine-prompt-terms = Version { $version } is downloaded. Installing it means accepting Google's terms for the module:
+widevine-prompt-installing = Installing…
+widevine-prompt-download = Download
+widevine-prompt-later = Not now
+widevine-prompt-accept = Accept and install
+widevine-prompt-decline = Decline
+settings-equalizer = Equalizer
+settings-equalizer-detail = Shapes the sound across ten bands, one per octave
+settings-equalizer-preset = Preset
+settings-equalizer-preset-detail = A ready-made curve for the bands below
+settings-equalizer-custom = Custom
+settings-equalizer-flat = Flat
+settings-equalizer-bass-boost = Bass boost
+settings-equalizer-bass-reducer = Bass reducer
+settings-equalizer-treble-boost = Treble boost
+settings-equalizer-vocal = Vocal
+settings-equalizer-rock = Rock
+settings-equalizer-pop = Pop
+settings-equalizer-jazz = Jazz
+settings-equalizer-classical = Classical
+settings-equalizer-electronic = Electronic
+settings-equalizer-acoustic = Acoustic
+settings-equalizer-loudness = Loudness
+settings-equalizer-decibels = { $db } dB
+settings-equalizer-hertz = { $hz } Hz
+settings-equalizer-kilohertz = { $khz } kHz
 settings-panel-lyrics-size = Lyrics size (panel)
 settings-panel-lyrics-size-detail = Size of the lyrics text in the side panel, on top of the base font size
 settings-fullscreen-lyrics-size = Lyrics size (fullscreen)
@@ -504,6 +636,8 @@ settings-fullscreen-lyrics-size-detail = Size of the lyrics text on the fullscre
 settings-lyrics-size-value = { $size }%
 settings-lyrics-for-local-files = Lyrics for local files
 settings-lyrics-for-local-files-detail = Use metadata from local files to fetch lyrics from the internet
+settings-prefer-local-lyrics = Prefer local lyrics
+settings-prefer-local-lyrics-detail = Use the lyrics stored in a local file's tags or its .lrc file instead of searching the other providers
 settings-karaoke-lyrics = Karaoke lyrics
 settings-karaoke-lyrics-detail = Highlight lyrics word by word when timing is available
 settings-blur-lyrics = Blur inactive lyrics
@@ -511,6 +645,20 @@ settings-blur-lyrics-detail = Blur upcoming and previous lines in the lyrics pan
 settings-romanized-lyrics = Romanized lyrics
 settings-romanized-lyrics-detail = Show locally generated pronunciation for selected writing systems
 settings-romanization-writing-systems = Writing systems
+settings-lyrics-providers = Lyrics providers
+settings-lyrics-providers-detail = Choose which services to search for lyrics
+settings-lyrics-providers-selected = { $count ->
+    [one] { $count } selected
+   *[other] { $count } selected
+    }
+settings-lyrics-provider-local = Local files
+settings-lyrics-provider-spotify = Spotify
+settings-lyrics-provider-youtube = YouTube Music
+settings-lyrics-provider-apple-music = Apple Music
+settings-lyrics-provider-musixmatch = Musixmatch
+settings-lyrics-provider-lrclib = LRCLIB
+settings-lyrics-provider-kugou = Kugou
+settings-lyrics-provider-netease = NetEase
 settings-romanization-japanese = Japanese
 settings-romanization-chinese = Chinese
 settings-romanization-korean = Korean
@@ -524,9 +672,12 @@ settings-group-accounts = Accounts
 settings-group-library = Library
 settings-group-text = Text
 settings-group-motion = Motion
+settings-group-fullscreen = Fullscreen
 settings-group-title-bar = Title bar
 settings-group-window-style = Window style
 settings-group-lyrics = Lyrics
+settings-group-equalizer = Equalizer
+settings-group-discord = Discord
 settings-group-project = Project
 settings-adaptive-menu = Adaptive context menu
 settings-adaptive-menu-detail = Leaves out entries the row already shows, such as the album or the artist
@@ -538,11 +689,37 @@ settings-provider-current = Playing from this service
 settings-provider-guest = Playing as a guest
 settings-provider-switch = Switch to
 settings-sign-out = Sign out
-settings-local-folder = Imported music folder
+settings-group-scrobbling = Scrobbling
+settings-lastfm = Last.fm
+settings-lastfm-detail = Sonora scrobbles through your own Last.fm API account. Create one, then paste the key and the secret here.
+settings-librefm = Libre.fm
+settings-listenbrainz = ListenBrainz
+settings-listenbrainz-detail = Paste a user token from your ListenBrainz settings page.
+settings-maloja = Maloja
+settings-maloja-detail = Point Sonora at your Maloja server and paste one of its API keys.
+settings-scrobble-off = Not connected
+settings-scrobble-on = Connected
+settings-scrobble-waiting = Waiting for your browser…
+settings-scrobble-as = Scrobbling as { $name }
+settings-scrobble-failed = Could not connect
+settings-scrobble-connect = Connect
+settings-scrobble-disconnect = Disconnect
+settings-scrobble-title = Connect { $service }
+settings-scrobble-request = Get an API key
+settings-scrobble-token-request = Get a token
+settings-scrobble-key = API key
+settings-scrobble-secret = API secret
+settings-scrobble-token = User token
+settings-scrobble-server = Server address
+settings-local-folder = Music folders
 settings-local-folder-empty = Not configured
 settings-choose-folder = Choose folder…
+settings-add-folder = Add folder
+settings-remove-folder = Remove folder
 settings-rescan = Rescan
-settings-clear-folder = Clear
+settings-scan-walking = Scanning…
+settings-scan-progress = { $percent }%
+settings-scan-done = Done in { $seconds }s
 settings-tab-about = About
 settings-version = Version
 settings-version-detail = The build of sonora you are running
@@ -591,6 +768,7 @@ saver-strong = Strong ({ $fps } FPS)
 toast-playlist-created = Playlist created
 toast-playlist-renamed = Playlist renamed
 toast-playlist-deleted = Playlist deleted
+toast-local-delete-failed = Some track files could not be deleted
 toast-playlist-added = Playlist added to your library
 toast-playlist-removed = Playlist removed from your library
 toast-playlist-visibility = Playlist visibility changed
@@ -601,18 +779,24 @@ toast-playlist-busy = Another change is still running
 toast-playlist-signed-out = Sign in to change playlists
 toast-queued-track = { $name } added to the queue
 toast-next-track = { $name } plays next
+toast-last-track = { $name } plays last
 toast-queued-album = Album added to the queue
 toast-next-album = Album plays next
+toast-last-album = Album plays last
 toast-queued-playlist = Playlist added to the queue
 toast-next-playlist = Playlist plays next
+toast-last-playlist = Playlist plays last
 toast-queued-artist = Artist added to the queue
 toast-next-artist = Artist plays next
+toast-last-artist = Artist plays last
 toast-queue-failed = That could not be added to the queue
 toast-keys-refused = Spotify is not granting this account playback keys
 toast-sign-in-to-play = { $name } only streams to a signed-in listener
 toast-track-unplayable = { $name } could not be played
 toast-library-add-failed = { $name } could not be added to your library
 toast-library-remove-failed = { $name } could not be removed from your library
+toast-library-added = Added to your library
+toast-library-removed = Removed from your library
 
 # lyrics
 lyrics-title = Lyrics
@@ -623,6 +807,7 @@ lyrics-instrumental = This song is instrumental
 lyrics-failed = Could not reach the lyrics service
 lyrics-follow = Follow the song again
 lyrics-source = Lyrics from { $source }
+lyrics-source-local = Lyrics from the local file
 lyrics-writers = Written by { $writers }
 
 update-available = Sonora { $version } is out
@@ -635,6 +820,9 @@ update-working = Downloading the update…
 update-failed = The update could not be installed. Try again from the releases page.
 settings-check-updates = Check for updates
 settings-check-updates-detail = Ask GitHub once at startup whether a newer version is out. Sonora installs the update itself on Windows only; elsewhere it points you at what changed
+settings-log = Log file
+settings-log-detail = What Sonora wrote while running. Attach it to a bug report
+settings-log-open = Open log
 
 # tags
 tags-edit-title = Edit tags
@@ -657,3 +845,18 @@ tags-isrc = ISRC
 tags-comment = Comment
 toast-tags-saved = Saved the tags for { $name }
 toast-tags-failed = The tags could not be saved
+
+nav-pin = Pin
+toast-library-pin-failed = Could not update the pin.
+nav-nothing-pinned = Nothing here
+nav-pins-alphabetical = Alphabetical
+nav-pins-kind = By type
+nav-show-full-library = Show full library
+nav-return-top = Back to top
+
+# trouble
+trouble-offline = No connection
+trouble-offline-detail = Check your internet connection and try again.
+trouble-not-loaded = Could not load
+trouble-retry = Try again
+toast-offline = No connection. Nothing will stream until it is back.
